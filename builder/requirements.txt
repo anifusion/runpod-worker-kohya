@@ -1,7 +1,15 @@
 # Required Python packages get listed here, one per line.
 # Reccomended to lock the version number to avoid unexpected changes.
 
-runpod
+# Pin problematic dependencies first to prevent backtracking
+pydantic==2.10.3
+pydantic-core==2.27.1
+fastapi==0.115.6
+starlette==0.41.3
+
+runpod==1.8.1
+httpx==0.27.0
+httpcore==1.0.0
 absl-py==2.1.0
 accelerate==0.30.0
 aiohappyeyeballs==2.4.4
@@ -10,7 +18,7 @@ aiosignal==1.3.2
 altair==4.2.2
 async-timeout==5.0.1
 attrs==25.1.0
-bitsandbytes==0.44.0
+bitsandbytes==0.42.0
 Bottleneck==1.4.2
 certifi==2025.1.31
 charset-normalizer==3.4.1
@@ -39,9 +47,9 @@ MarkupSafe==3.0.2
 mdurl==0.1.2
 mpmath==1.3.0
 multidict==6.1.0
-networkx==3.4.2
+networkx==3.2.1
 numexpr==2.10.2
-numpy==2.2.2
+numpy==1.25.2
 opencv-python==4.11.0.86
 packaging==24.2
 pandas==2.2.3
@@ -68,18 +76,18 @@ tensorboard-data-server==0.7.2
 tokenizers==0.19.1
 toml==0.10.2
 toolz==1.0.0
-torch
+torch==2.3.1
 torchmetrics==1.6.1
-torchvision
+torchvision==0.18.1
 tqdm==4.67.1
 transformers==4.44.0
-triton==2.1.0
+triton==2.3.1
 typing_extensions==4.12.2
 tzdata==2025.1
 urllib3==2.3.0
 voluptuous==0.13.1
 wcwidth==0.2.13
 Werkzeug==3.1.3
-xformers
+xformers==0.0.27
 yarl==1.18.3
 zipp==3.21.0
