@@ -15,7 +15,7 @@ apt-get clean -y && \
 rm -rf /var/lib/apt/lists/*
 
 # Clone kohya-ss/sd-scripts
-git clone https://github.com/gsass1/sd-scripts.git && \
+git clone https://github.com/anifusion/sd-scripts.git && \
     cd sd-scripts && \
     git checkout f8e8f89b1d0eb613d7f0fadf61a9f695fd4503f4
 
