@@ -160,24 +160,21 @@ def handler(job):
     except Exception as e:
         return {"error": f"Failed to download zip file: {str(e)}"}
 
-    if not os.path.exists("./training"):
-        os.mkdir("./training")
-        os.mkdir("./training/img")
+    # Clean up any stale training directory from previous jobs on this worker
+    if os.path.exists("./training"):
+        shutil.rmtree("./training")
 
-        # Use sanitized parameters for directory creation
-        safe_dir_name = f"{job_input['steps']}_{sanitized_params.get('instance_name', job_input['instance_name'])} {sanitized_params.get('class_name', job_input['class_name'])}"
-        safe_dir_name = sanitize_string_param(safe_dir_name)
+    os.mkdir("./training")
+    os.mkdir("./training/img")
+    os.mkdir("./training/model")
+    os.mkdir("./training/logs")
 
-        os.mkdir(f"./training/img/{safe_dir_name}")
-        os.mkdir("./training/model")
-        os.mkdir("./training/logs")
-
-    # Make clean data directory
+    # Create training data directory with kohya naming convention (repeats_instancename classname)
     allowed_extensions = [".jpg", ".jpeg", ".png", ".txt"]
     safe_dir_name = f"{job_input['steps']}_{sanitized_params.get('instance_name', job_input['instance_name'])} {sanitized_params.get('class_name', job_input['class_name'])}"
     safe_dir_name = sanitize_string_param(safe_dir_name)
     flat_directory = f"./training/img/{safe_dir_name}"
-    os.makedirs(flat_directory, exist_ok=True)
+    os.mkdir(flat_directory)
 
     for root, dirs, files in os.walk(downloaded_input["extracted_path"]):
         # Skip __MACOSX folder
@@ -271,11 +268,15 @@ def handler(job):
     except Exception as e:
         return {"error": f"Training process error: {str(e)}"}
 
+    output_path = f"./training/model/{out_id}.safetensors"
+    if not os.path.exists(output_path):
+        return {"error": f"Training completed but output file not found: {output_path}"}
+
     job_s3_config = job.get("s3Config")
 
     uploaded_lora_url = upload_file_to_bucket(
         file_name=f"{out_id}.safetensors",
-        file_location=f"./training/model/{out_id}.safetensors",
+        file_location=output_path,
         bucket_creds=job_s3_config,
         # bucket_name=None if job_s3_config is None else job_s3_config['bucketName'],
         bucket_name="lora",
