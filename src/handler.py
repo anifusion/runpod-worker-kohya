@@ -25,7 +25,7 @@ def validate_url(url):
         if not parsed.hostname:
             return False
         return True
-    except:
+    except Exception:
         return False
 
 
@@ -62,7 +62,7 @@ def validate_numeric_param(param_value, min_val=None, max_val=None):
         if max_val is not None and num_val > max_val:
             return False
         return True
-    except:
+    except Exception:
         return False
 
 
@@ -82,6 +82,8 @@ def handler(job):
     # Validate and sanitize inputs
     model_url = job_input["model_url"]
     model_basename = sanitize_filename(os.path.basename(model_url))
+    if not model_basename:
+        return {"error": "Invalid model URL: could not derive a valid filename"}
 
     # Validate numeric parameters with appropriate ranges
     numeric_params = {
@@ -170,7 +172,8 @@ def handler(job):
     os.mkdir("./training/logs")
 
     # Create training data directory with kohya naming convention (repeats_instancename classname)
-    allowed_extensions = [".jpg", ".jpeg", ".png", ".txt"]
+    image_extensions = [".jpg", ".jpeg", ".png"]
+    allowed_extensions = image_extensions + [".txt"]
     safe_dir_name = f"{job_input['steps']}_{sanitized_params.get('instance_name', job_input['instance_name'])} {sanitized_params.get('class_name', job_input['class_name'])}"
     safe_dir_name = sanitize_string_param(safe_dir_name)
     flat_directory = f"./training/img/{safe_dir_name}"
@@ -185,6 +188,16 @@ def handler(job):
             file_path = os.path.join(root, file)
             if os.path.splitext(file_path)[1].lower() in allowed_extensions:
                 shutil.copy(file_path, flat_directory)
+
+    image_count = sum(
+        1
+        for f in os.listdir(flat_directory)
+        if os.path.splitext(f)[1].lower() in image_extensions
+    )
+    if image_count == 0:
+        return {
+            "error": f"No training images found in extracted zip. Files in training dir: {os.listdir(flat_directory)}"
+        }
 
     out_id = sanitize_string_param(job_input["out_id"] or job["id"])
 
@@ -274,13 +287,16 @@ def handler(job):
 
     job_s3_config = job.get("s3Config")
 
-    uploaded_lora_url = upload_file_to_bucket(
-        file_name=f"{out_id}.safetensors",
-        file_location=output_path,
-        bucket_creds=job_s3_config,
-        # bucket_name=None if job_s3_config is None else job_s3_config['bucketName'],
-        bucket_name="lora",
-    )
+    try:
+        uploaded_lora_url = upload_file_to_bucket(
+            file_name=f"{out_id}.safetensors",
+            file_location=output_path,
+            bucket_creds=job_s3_config,
+            # bucket_name=None if job_s3_config is None else job_s3_config['bucketName'],
+            bucket_name="lora",
+        )
+    except Exception as e:
+        return {"error": f"Failed to upload model: {str(e)}"}
 
     return {"lora": uploaded_lora_url}
 
