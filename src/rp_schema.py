@@ -104,7 +104,8 @@ INPUT_SCHEMA = {
     },
     "http_log_token": {
         "type": str,
-        "required": True
+        "required": False,
+        "default": "none"
     },
     "http_log_every": {
         "type": int,
