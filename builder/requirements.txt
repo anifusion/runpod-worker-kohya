@@ -38,7 +38,7 @@ importlib_metadata==8.6.1
 Jinja2==3.1.5
 jsonschema==4.23.0
 jsonschema-specifications==2024.10.1
--e git+https://github.com/kohya-ss/sd-scripts@6e3c1d0b58f03522f294dc2b0acbbbecc944d018#egg=library
+-e git+https://github.com/anifusion/sd-scripts.git@c1a989648c1925f05f7b2206f27363d036eb4b86#egg=library
 lightning-utilities==0.12.0
 lion-pytorch==0.0.6
 Markdown==3.7

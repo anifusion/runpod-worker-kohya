@@ -5,7 +5,7 @@ name: CI | Test Worker
 # - GH_PAT: A GitHub Personal Access Token with access to the repository
 
 # Requires the following variables:
-# - RUNPOD_ENDPOINT: The endpoint of the Runpod API
+# - RUNNER_24GB: RunPod endpoint id used to provision the test runner and to cancel jobs (must match deploy/status/cancel)
 
 on:
   push:
@@ -69,12 +69,7 @@ jobs:
       - name: Execute Tests
         run: |
           cd sd-scripts/ && \
-          python handler.py --test_input='{"input": {
-            "zip_url": "https://github.com/runpod-workers/sample-inputs/raw/main/images/froggy.zip",
-            "instance_name": "daiton",
-            "class_name": "frog",
-            "steps": 1
-          }}'
+          python handler.py --test_input='{"input":{"zip_url":"https://github.com/runpod-workers/sample-inputs/raw/main/images/froggy.zip","model_url":"https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors","instance_name":"daiton","class_name":"frog","steps":1,"max_train_steps":1,"http_log_endpoint":"https://httpbin.org/post","http_log_name":"ci-test"}}'
 
   terminate_runner:
     if: always()
@@ -101,7 +96,7 @@ jobs:
         if: ${{ steps.parse_status.outputs.status != 'COMPLETED' }}
         uses: fjogeleit/http-request-action@v1
         with:
-          url: "https://api.runpod.ai/v2/${{ vars.RUNPOD_ENDPOINT }}/cancel/${{ needs.initialize_runner.outputs.id }}"
+          url: "https://api.runpod.ai/v2/${{ vars.RUNNER_24GB }}/cancel/${{ needs.initialize_runner.outputs.id }}"
           method: "POST"
           customHeaders: '{"Content-Type": "application/json"}'
           bearerToken: ${{ secrets.RUNPOD_API_KEY }}
