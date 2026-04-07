@@ -9,7 +9,8 @@ INPUT_SCHEMA = {
     },
     'out_id': {
         'type': str,
-        'required': False
+        'required': False,
+        'default': ''
     },
     'instance_name': {
         'type': str,
@@ -22,12 +23,12 @@ INPUT_SCHEMA = {
     'unet_lr': {
         'type': float,
         'required': False,
-        'default': 0.0001
+        'default': 0.00005
     },
     'text_encoder_lr': {
         'type': float,
         'required': False,
-        'default': 0.00005
+        'default': 0.00002
     },
     'network_dim': {
         'type': int,
@@ -47,7 +48,7 @@ INPUT_SCHEMA = {
     'learning_rate': {
         'type': float,
         'required': False,
-        'default': 0.0001
+        'default': 0.00005
     },
     'lr_scheduler': {
         'type': str,
@@ -93,6 +94,18 @@ INPUT_SCHEMA = {
         'type': int,
         'required': False,
         'default': 125
+    },
+    # Match v-prediction SDXL checkpoints (e.g. NoobAI XL); aligns target/loss with the UNet.
+    'v_parameterization': {
+        'type': bool,
+        'required': False,
+        'default': False
+    },
+    # Pairs with v-pred + zero-terminal-SNR schedulers (same as inference rescale_betas_snr_zero).
+    'zero_terminal_snr': {
+        'type': bool,
+        'required': False,
+        'default': False
     },
     "http_log_endpoint": {
         "type": str,

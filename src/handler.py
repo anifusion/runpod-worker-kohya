@@ -3,9 +3,12 @@ Handler for the generation of a fine tuned lora model.
 """
 
 import os
+import re
+import select
 import shutil
 import subprocess
-import re
+import sys
+import time
 from urllib.parse import urlparse
 
 import runpod
@@ -13,6 +16,96 @@ from runpod.serverless.utils.rp_validator import validate
 from runpod.serverless.utils import rp_download, upload_file_to_bucket
 
 from rp_schema import INPUT_SCHEMA
+
+# Kohya tqdm reports moving-average loss as "avr_loss=..."; NaN runs must not ship weights.
+TRAINING_LOSS_NAN_PATTERN = re.compile(r"avr_loss=nan\b", re.IGNORECASE)
+
+
+def _run_training_subprocess(
+    cmd_args: list,
+    timeout_sec: int,
+) -> tuple[int, bool]:
+    """
+    Run training with live stdout (RunPod logs), enforce timeout, detect NaN loss in output.
+    Returns (returncode, saw_nan_in_output).
+    """
+    if sys.platform == "win32":
+        result = subprocess.run(
+            cmd_args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout_sec,
+        )
+        out = result.stdout or ""
+        print(out, end="")
+        saw_nan = bool(TRAINING_LOSS_NAN_PATTERN.search(out))
+        return result.returncode, saw_nan
+
+    proc = subprocess.Popen(
+        cmd_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+    )
+    assert proc.stdout is not None
+    out_fd = proc.stdout.fileno()
+    saw_nan = False
+    text_buf = ""
+    deadline = time.monotonic() + timeout_sec
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            proc.kill()
+            try:
+                proc.wait(timeout=30)
+            except Exception:
+                pass
+            raise subprocess.TimeoutExpired(cmd_args, timeout_sec)
+
+        r, _, _ = select.select([proc.stdout], [], [], min(max(remaining, 0), 1.0))
+        if proc.stdout in r:
+            chunk = os.read(out_fd, 65536)
+            if chunk:
+                decoded = chunk.decode("utf-8", errors="replace")
+                sys.stdout.write(decoded)
+                sys.stdout.flush()
+                text_buf += decoded
+                if len(text_buf) > 524288:
+                    text_buf = text_buf[-262144:]
+                if TRAINING_LOSS_NAN_PATTERN.search(text_buf):
+                    saw_nan = True
+        if proc.poll() is not None:
+            break
+
+    while True:
+        chunk = os.read(out_fd, 65536)
+        if not chunk:
+            break
+        decoded = chunk.decode("utf-8", errors="replace")
+        sys.stdout.write(decoded)
+        sys.stdout.flush()
+        text_buf += decoded
+        if len(text_buf) > 524288:
+            text_buf = text_buf[-262144:]
+        if TRAINING_LOSS_NAN_PATTERN.search(text_buf):
+            saw_nan = True
+
+    return proc.wait(), saw_nan
+
+
+def cuda_supports_bf16() -> bool:
+    """Ampere+ (e.g. RTX 30/40/50) — mixed bf16 avoids full-fp16 overflow that often yields NaN loss."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return False
+        fn = getattr(torch.cuda, "is_bf16_supported", None)
+        return bool(fn()) if callable(fn) else False
+    except Exception:
+        return False
 
 
 def validate_url(url):
@@ -201,6 +294,19 @@ def handler(job):
 
     out_id = sanitize_string_param(job_input["out_id"] or job["id"])
 
+    use_bf16 = cuda_supports_bf16()
+    mixed_precision = "bf16" if use_bf16 else "fp16"
+    # Keep saved LoRA in fp16 for smaller files; training uses mixed bf16/fp16 weights only.
+    save_precision = "fp16"
+    if use_bf16:
+        print(
+            "runpod-worker-kohya: mixed-precision bf16, no full_fp16 (stability best practice)"
+        )
+    else:
+        print(
+            "runpod-worker-kohya: mixed-precision fp16, no full_fp16 (bf16 not available on this GPU)"
+        )
+
     # Build secure command arguments array (no shell injection possible)
     cmd_args = [
         "accelerate",
@@ -218,10 +324,9 @@ def handler(job):
         str(job_input["text_encoder_lr"]),
         "--no_half_vae",
         "--mixed_precision",
-        "fp16",
+        mixed_precision,
         "--save_precision",
-        "fp16",
-        "--full_fp16",
+        save_precision,
         "--gradient_checkpointing",
         "--unet_lr",
         str(job_input["unet_lr"]),
@@ -272,16 +377,39 @@ def handler(job):
         "--bucket_no_upscale",
     ]
 
+    if job_input.get("v_parameterization"):
+        cmd_args.append("--v_parameterization")
+        print("runpod-worker-kohya: v-parameterization training enabled (v-pred base model)")
+    if job_input.get("zero_terminal_snr"):
+        cmd_args.append("--zero_terminal_snr")
+        if job_input.get("v_parameterization"):
+            print("runpod-worker-kohya: zero-terminal-SNR scheduler fix enabled")
+
     try:
-        subprocess.run(cmd_args, check=True, timeout=3600)  # 1 hour timeout
+        returncode, output_had_nan = _run_training_subprocess(cmd_args, 3600)
     except subprocess.TimeoutExpired:
         return {"error": "Training process timed out"}
-    except subprocess.CalledProcessError as e:
-        return {"error": f"Training process failed: {e.returncode}"}
     except Exception as e:
         return {"error": f"Training process error: {str(e)}"}
 
+    if returncode != 0:
+        return {"error": f"Training process failed: {returncode}"}
+
     output_path = f"./training/model/{out_id}.safetensors"
+
+    if output_had_nan:
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+        return {
+            "error": (
+                "Training reported non-finite loss (NaN); checkpoint was discarded. "
+                "Try lower learning rates, different images or captions, or a different base model."
+            )
+        }
+
     if not os.path.exists(output_path):
         return {"error": f"Training completed but output file not found: {output_path}"}
 
