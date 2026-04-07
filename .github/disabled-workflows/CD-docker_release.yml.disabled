@@ -1,9 +1,11 @@
-name: CD | Dev Docker Image
+# DISABLED: Archived — used secrets.DOCKERHUB_*; RunPod builds from git instead.
+# Restore to .github/workflows/CD-docker_release.yml to re-enable Docker Hub push on release.
+
+name: CD | Release Docker Image
 
 on:
-  push:
-    branches:
-      - "main"
+  release:
+    types: [published]
 
 jobs:
   docker:
@@ -32,4 +34,4 @@ jobs:
         uses: docker/build-push-action@v4
         with:
           push: true
-          tags: ${{ vars.DOCKERHUB_REPO }}/${{ vars.DOCKERHUB_IMG }}:dev
+          tags: ${{ secrets.DOCKERHUB_REPO }}/${{ secrets.DOCKERHUB_IMG }}:${{ github.event.release.tag_name }}

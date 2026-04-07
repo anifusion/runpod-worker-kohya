@@ -1,3 +1,6 @@
+# DISABLED: Archived — referenced secrets.GITHUB_TOKEN (repo secret context).
+# Restore to .github/workflows/CI-runpod_dep.yml to re-enable automated runpod version PRs.
+
 name: CI | Update runpod package version
 
 on:

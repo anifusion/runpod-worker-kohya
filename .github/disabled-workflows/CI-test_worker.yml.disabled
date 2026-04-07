@@ -1,6 +1,6 @@
-# DISABLED: Renamed from CI-test_worker.yml — GitHub only runs *.yml / *.yaml here.
+# DISABLED: Archived under .github/disabled-workflows/ (not loaded as a workflow).
 # Previously required secrets RUNPOD_API_KEY, GH_PAT and variable RUNNER_24GB.
-# To re-enable: rename to CI-test_worker.yml and restore those repo secrets/variables.
+# To re-enable: move to .github/workflows/CI-test_worker.yml and restore those repo secrets/variables.
 
 name: CI | Test Worker
 
