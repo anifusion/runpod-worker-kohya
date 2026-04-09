@@ -24,10 +24,10 @@ TRAINING_LOSS_NAN_PATTERN = re.compile(r"avr_loss=nan\b", re.IGNORECASE)
 def _run_training_subprocess(
     cmd_args: list,
     timeout_sec: int,
-) -> tuple[int, bool]:
+) -> tuple[int, bool, str]:
     """
     Run training with live stdout (RunPod logs), enforce timeout, detect NaN loss in output.
-    Returns (returncode, saw_nan_in_output).
+    Returns (returncode, saw_nan_in_output, output_tail).
     """
     if sys.platform == "win32":
         result = subprocess.run(
@@ -40,7 +40,7 @@ def _run_training_subprocess(
         out = result.stdout or ""
         print(out, end="")
         saw_nan = bool(TRAINING_LOSS_NAN_PATTERN.search(out))
-        return result.returncode, saw_nan
+        return result.returncode, saw_nan, out[-2000:]
 
     proc = subprocess.Popen(
         cmd_args,
@@ -92,7 +92,7 @@ def _run_training_subprocess(
         if TRAINING_LOSS_NAN_PATTERN.search(text_buf):
             saw_nan = True
 
-    return proc.wait(), saw_nan
+    return proc.wait(), saw_nan, text_buf[-2000:]
 
 
 def cuda_supports_bf16() -> bool:
@@ -375,6 +375,8 @@ def handler(job):
         "--bucket_reso_steps",
         "64",
         "--bucket_no_upscale",
+        "--tokenizer_cache_dir",
+        "/tokenizer_cache",
     ]
 
     if job_input.get("v_parameterization"):
@@ -386,14 +388,17 @@ def handler(job):
             print("runpod-worker-kohya: zero-terminal-SNR scheduler fix enabled")
 
     try:
-        returncode, output_had_nan = _run_training_subprocess(cmd_args, 3600)
+        returncode, output_had_nan, output_tail = _run_training_subprocess(cmd_args, 3600)
     except subprocess.TimeoutExpired:
         return {"error": "Training process timed out"}
     except Exception as e:
         return {"error": f"Training process error: {str(e)}"}
 
     if returncode != 0:
-        return {"error": f"Training process failed: {returncode}"}
+        return {
+            "error": f"Training process failed: {returncode}",
+            "details": output_tail,
+        }
 
     output_path = f"./training/model/{out_id}.safetensors"
 

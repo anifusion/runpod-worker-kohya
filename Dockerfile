@@ -21,6 +21,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --force-reinstall -v "numpy==1.25.2" && \
     rm /requirements.txt
 
+# Pre-cache SDXL CLIP tokenizers so training never needs HuggingFace Hub access
+RUN python3 -c "\
+from transformers import CLIPTokenizer; \
+CLIPTokenizer.from_pretrained('openai/clip-vit-large-patch14').save_pretrained('/tokenizer_cache/openai_clip-vit-large-patch14'); \
+CLIPTokenizer.from_pretrained('laion/CLIP-ViT-bigG-14-laion2B-39B-b160k').save_pretrained('/tokenizer_cache/laion_CLIP-ViT-bigG-14-laion2B-39B-b160k')"
+
+ENV HF_HOME=/runpod-volume/hf-cache
 
 # Add src files (Worker Template)
 ADD src /sd-scripts
