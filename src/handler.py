@@ -2,10 +2,12 @@
 Handler for the generation of a fine tuned lora model.
 """
 
+import json
 import os
 import re
 import select
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -133,6 +135,110 @@ def sanitize_filename(filename):
     return filename
 
 
+_CHECKPOINT_SUFFIXES = (
+    ".safetensors",
+    ".sft",
+    ".ckpt",
+    ".pt",
+    ".pth",
+    ".bin",
+)
+
+_MAX_SAFE_TENSORS_HEADER = 100 * 1024 * 1024
+
+
+def checkpoint_leaf_from_url(model_url: str) -> str:
+    """Sanitized URL path basename (may already include .safetensors, .ckpt, etc.)."""
+    path = urlparse(model_url).path
+    base = sanitize_filename(os.path.basename(path))
+    return base or "base_model"
+
+
+def leaf_has_checkpoint_extension(leaf: str) -> bool:
+    lower = leaf.lower()
+    return any(lower.endswith(sfx) for sfx in _CHECKPOINT_SUFFIXES)
+
+
+def sniff_checkpoint_extension(local_path: str) -> str:
+    """
+    Pick a filename suffix so Kohya's loader matches file contents.
+    Blindly assuming .safetensors for Civitai /models/<id> is wrong if the version is a pickle .ckpt.
+    """
+    with open(local_path, "rb") as f:
+        head = f.read(8)
+    if len(head) < 2:
+        raise ValueError("file too small")
+    if head[:2] == b"\x1f\x8b":
+        raise ValueError("gzip prefix (need raw checkpoint bytes)")
+    if len(head) >= 4 and head[0:2] == b"PK" and head[2:4] == b"\x03\x04":
+        return ".ckpt"
+    # Try safetensors before PROTO 0x80: header length 128 makes first byte 0x80.
+    hlen = struct.unpack("<Q", head)[0]
+    if 1 <= hlen <= _MAX_SAFE_TENSORS_HEADER:
+        with open(local_path, "rb") as f:
+            f.seek(8)
+            raw = f.read(hlen)
+        if len(raw) >= hlen:
+            try:
+                meta = json.loads(raw.decode("utf-8"))
+                if isinstance(meta, dict):
+                    return ".safetensors"
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                pass
+    if head[0:1] == b"\x80":
+        return ".ckpt"
+    raise ValueError("not a recognized safetensors, zip, or pickle checkpoint")
+
+
+def _volume_checkpoint_try_legacy_migrate(
+    volume_dir: str, leaf: str, legacy_path: str
+) -> str | None:
+    """If an old cache used a bare numeric name, copy to leaf.<ext> so Kohya sees the right loader."""
+    if not os.path.isfile(legacy_path):
+        return None
+    try:
+        ext = sniff_checkpoint_extension(legacy_path)
+    except ValueError as e:
+        print(f"runpod-worker-kohya: ignoring unusable legacy cache {legacy_path}: {e}")
+        return None
+    fixed = os.path.join(volume_dir, leaf + ext)
+    if fixed != legacy_path and not os.path.isfile(fixed):
+        try:
+            shutil.copy2(legacy_path, fixed)
+            print(f"runpod-worker-kohya: migrated legacy cache {legacy_path} -> {fixed}")
+        except OSError as src_err:
+            print(f"runpod-worker-kohya: could not migrate legacy cache: {src_err}")
+            return legacy_path
+    return fixed if os.path.isfile(fixed) else legacy_path
+
+
+def resolve_volume_checkpoint_path(volume_dir: str, model_url: str) -> str | None:
+    """Return an existing cached checkpoint path, or None to download."""
+    leaf = checkpoint_leaf_from_url(model_url)
+
+    if leaf_has_checkpoint_extension(leaf):
+        p = os.path.join(volume_dir, leaf)
+        return p if os.path.isfile(p) else None
+
+    for suffix in (".safetensors", ".ckpt"):
+        p = os.path.join(volume_dir, leaf + suffix)
+        if os.path.isfile(p):
+            return p
+
+    return _volume_checkpoint_try_legacy_migrate(volume_dir, leaf, os.path.join(volume_dir, leaf))
+
+
+def finalize_volume_checkpoint_dest(
+    volume_dir: str, model_url: str, downloaded_path: str
+) -> str:
+    """Target path under volume_dir after a fresh download (sniffs when URL has no extension)."""
+    leaf = checkpoint_leaf_from_url(model_url)
+    if leaf_has_checkpoint_extension(leaf):
+        return os.path.join(volume_dir, leaf)
+    ext = sniff_checkpoint_extension(downloaded_path)
+    return os.path.join(volume_dir, leaf + ext)
+
+
 def sanitize_string_param(param_value):
     """Sanitize string parameters to prevent command injection while preserving functionality."""
     if not isinstance(param_value, str):
@@ -174,9 +280,6 @@ def handler(job):
 
     # Validate and sanitize inputs
     model_url = job_input["model_url"]
-    model_basename = sanitize_filename(os.path.basename(model_url))
-    if not model_basename:
-        return {"error": "Invalid model URL: could not derive a valid filename"}
 
     # Validate numeric parameters with appropriate ranges
     numeric_params = {
@@ -220,9 +323,9 @@ def handler(job):
 
     VOLUME_DIR = "/runpod-volume"
 
-    # Check if model exists in volume directory
-    volume_model_path = os.path.join(VOLUME_DIR, model_basename)
-    if os.path.exists(volume_model_path):
+    # Check if model exists in volume directory (correct suffix, or legacy bare name)
+    volume_model_path = resolve_volume_checkpoint_path(VOLUME_DIR, model_url)
+    if volume_model_path:
         print(f"Model found in volume, using cached version: {volume_model_path}")
         downloaded_model = {"file_path": volume_model_path}
     else:
@@ -235,6 +338,12 @@ def handler(job):
 
         # Make sure we check if the volume directory exists, in that case just use the download file path
         if os.path.exists(VOLUME_DIR):
+            try:
+                volume_model_path = finalize_volume_checkpoint_dest(
+                    VOLUME_DIR, model_url, downloaded_model["file_path"]
+                )
+            except ValueError as e:
+                return {"error": f"Downloaded file is not a usable base checkpoint: {e}"}
             print(f"Moving model to volume for caching: {volume_model_path}")
             try:
                 shutil.copy(downloaded_model["file_path"], volume_model_path)
