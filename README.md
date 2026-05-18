@@ -15,6 +15,8 @@ Derived from e1pupper's RunPod worker implementation https://github.com/e1pupper
 
 ## Inputs
 
+Raster files inside `zip_url` must end with `.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`, `.bmp`, `.tif`, or `.tiff` (case insensitive). Caption sidecars use `.txt` with the same basename as their image.
+
 | Name                        | Type  | Description                                             | Default     | Required |
 |-----------------------------|-------|---------------------------------------------------------|-------------|:--------:|
 | zip_url                     | str   | URL to the zip file containing the data                 | None        |    ✔️     |

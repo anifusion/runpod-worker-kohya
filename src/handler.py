@@ -373,8 +373,11 @@ def handler(job):
     os.mkdir("./training/model")
     os.mkdir("./training/logs")
 
-    # Create training data directory with kohya naming convention (repeats_instancename classname)
-    image_extensions = [".jpg", ".jpeg", ".png"]
+    # Create training data directory with kohya naming convention (repeats_instancename classname).
+    # Must stay aligned with Anifusion `MODEL_TRAINING_ZIP_IMAGE_FILE_EXTENSIONS`
+    # (`app/src/lib/server/model_training_zip.ts`): if we skip an extension here, only captions (.txt)
+    # copy through and training fails with "No training images found in extracted zip".
+    image_extensions = [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".tif"]
     allowed_extensions = image_extensions + [".txt"]
     safe_dir_name = f"{job_input['steps']}_{sanitized_params.get('instance_name', job_input['instance_name'])} {sanitized_params.get('class_name', job_input['class_name'])}"
     safe_dir_name = sanitize_string_param(safe_dir_name)
