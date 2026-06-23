@@ -14,10 +14,18 @@ import time
 from urllib.parse import urlparse
 
 import runpod
+from boto3 import session as boto_session
+from boto3.s3.transfer import TransferConfig
+from botocore.config import Config as BotoConfig
+from runpod.serverless.utils.rp_upload import extract_region_from_url
 from runpod.serverless.utils.rp_validator import validate
-from runpod.serverless.utils import rp_download, upload_file_to_bucket
+from runpod.serverless.utils import rp_download
+from tqdm_loggable.auto import tqdm
 
 from rp_schema import INPUT_SCHEMA
+
+LORA_UPLOAD_MAX_CONCURRENCY = 4
+LORA_UPLOAD_MAX_POOL_CONNECTIONS = 16
 
 # Kohya tqdm reports moving-average loss as "avr_loss=..."; NaN runs must not ship weights.
 TRAINING_LOSS_NAN_PATTERN = re.compile(r"avr_loss=nan\b", re.IGNORECASE)
@@ -250,6 +258,71 @@ def sanitize_string_param(param_value):
     )  # Remove individual dangerous chars
     param_value = re.sub(r"&&|\|\|", "_", param_value)  # Remove shell operators
     return param_value
+
+
+def upload_lora_to_bucket(
+    file_name: str,
+    file_location: str,
+    bucket_creds=None,
+    bucket_name: str = "lora",
+) -> str:
+    """
+    Upload a trained LoRA to object storage with bounded multipart concurrency so
+    urllib3 does not warn about connection pool exhaustion on high-core hosts.
+    """
+    transfer_config = TransferConfig(
+        multipart_threshold=1024 * 25,
+        max_concurrency=LORA_UPLOAD_MAX_CONCURRENCY,
+        multipart_chunksize=1024 * 25,
+        use_threads=True,
+    )
+
+    if bucket_creds:
+        endpoint_url = bucket_creds["endpointUrl"]
+        access_key_id = bucket_creds["accessId"]
+        secret_access_key = bucket_creds["accessSecret"]
+    else:
+        endpoint_url = os.environ.get("BUCKET_ENDPOINT_URL", None)
+        access_key_id = os.environ.get("BUCKET_ACCESS_KEY_ID", None)
+        secret_access_key = os.environ.get("BUCKET_SECRET_ACCESS_KEY", None)
+
+    if not (endpoint_url and access_key_id and secret_access_key):
+        print("No bucket endpoint set, saving to disk folder 'local_upload'")
+        os.makedirs("local_upload", exist_ok=True)
+        local_upload_location = f"local_upload/{file_name}"
+        shutil.copyfile(file_location, local_upload_location)
+        return local_upload_location
+
+    region = extract_region_from_url(endpoint_url)
+    bucket_session = boto_session.Session()
+    boto_client = bucket_session.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=access_key_id,
+        aws_secret_access_key=secret_access_key,
+        config=BotoConfig(
+            signature_version="s3v4",
+            retries={"max_attempts": 3, "mode": "standard"},
+            max_pool_connections=LORA_UPLOAD_MAX_POOL_CONNECTIONS,
+        ),
+        region_name=region,
+    )
+
+    file_size = os.path.getsize(file_location)
+    with tqdm(total=file_size, unit="B", unit_scale=True, desc=file_name) as progress_bar:
+        boto_client.upload_file(
+            Filename=file_location,
+            Bucket=bucket_name,
+            Key=file_name,
+            Config=transfer_config,
+            Callback=progress_bar.update,
+        )
+
+    return boto_client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket_name, "Key": file_name},
+        ExpiresIn=604800,
+    )
 
 
 def validate_numeric_param(param_value, min_val=None, max_val=None):
@@ -533,11 +606,10 @@ def handler(job):
     job_s3_config = job.get("s3Config")
 
     try:
-        uploaded_lora_url = upload_file_to_bucket(
+        uploaded_lora_url = upload_lora_to_bucket(
             file_name=f"{out_id}.safetensors",
             file_location=output_path,
             bucket_creds=job_s3_config,
-            # bucket_name=None if job_s3_config is None else job_s3_config['bucketName'],
             bucket_name="lora",
         )
     except Exception as e:

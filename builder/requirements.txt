@@ -38,7 +38,7 @@ importlib_metadata==8.6.1
 Jinja2==3.1.5
 jsonschema==4.23.0
 jsonschema-specifications==2024.10.1
--e git+https://github.com/anifusion/sd-scripts.git@c1a989648c1925f05f7b2206f27363d036eb4b86#egg=library
+-e git+https://github.com/anifusion/sd-scripts.git@d379815f8a5f6814132fe5833ece36a28f5e29e3#egg=library
 lightning-utilities==0.12.0
 lion-pytorch==0.0.6
 Markdown==3.7
