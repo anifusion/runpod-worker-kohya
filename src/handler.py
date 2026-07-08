@@ -106,7 +106,7 @@ def _run_training_subprocess(
 
 
 def cuda_supports_bf16() -> bool:
-    """Ampere+ (e.g. RTX 30/40/50) — mixed bf16 avoids full-fp16 overflow that often yields NaN loss."""
+    """Ampere+ (e.g. RTX 30/40/50) · mixed bf16 avoids full-fp16 overflow that often yields NaN loss."""
     try:
         import torch
 
