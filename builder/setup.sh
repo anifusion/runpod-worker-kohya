@@ -14,10 +14,10 @@ apt-get autoremove -y && \
 apt-get clean -y && \
 rm -rf /var/lib/apt/lists/*
 
-# Clone kohya-ss/sd-scripts
+# Keep this pin at the latest anifusion/sd-scripts http-logging tip (must match builder/requirements.txt).
 git clone https://github.com/anifusion/sd-scripts.git && \
     cd sd-scripts && \
-    git checkout d379815f8a5f6814132fe5833ece36a28f5e29e3
+    git checkout 4f08bd287e15b6ffca63a06362e7a2c00ba68c67
 
 # Cache models
 #wget https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors -P /model_cache
