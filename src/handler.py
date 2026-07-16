@@ -30,6 +30,56 @@ LORA_UPLOAD_MAX_POOL_CONNECTIONS = 16
 # Kohya tqdm reports moving-average loss as "avr_loss=..."; NaN runs must not ship weights.
 TRAINING_LOSS_NAN_PATTERN = re.compile(r"avr_loss=nan\b", re.IGNORECASE)
 
+# Use /tmp so accelerate config is never blocked by a full RunPod volume (HF_HOME).
+ACCELERATE_CONFIG_PATH = "/tmp/anifusion_accelerate_default_config.yaml"
+# SDXL checkpoints are multi-GB; tiny files are failed/partial volume caches.
+_MIN_VOLUME_CHECKPOINT_BYTES = 1_000_000
+
+
+def _usable_volume_checkpoint(path: str) -> bool:
+    try:
+        return os.path.getsize(path) >= _MIN_VOLUME_CHECKPOINT_BYTES
+    except OSError:
+        return False
+
+
+def _drop_unusable_volume_checkpoint(path: str, reason: str) -> None:
+    print(f"runpod-worker-kohya: ignoring volume cache {path}: {reason}")
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def ensure_accelerate_config(mixed_precision: str) -> str:
+    """Write a valid accelerate launch config and return its path."""
+    if mixed_precision not in ("bf16", "fp16"):
+        mixed_precision = "fp16"
+    config_body = f"""compute_environment: LOCAL_MACHINE
+distributed_type: 'NO'
+downcast_bf16: 'no'
+gpu_ids: all
+machine_rank: 0
+main_training_function: main
+mixed_precision: {mixed_precision}
+num_machines: 1
+num_processes: 1
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+"""
+    try:
+        with open(ACCELERATE_CONFIG_PATH, "w", encoding="utf-8") as config_file:
+            config_file.write(config_body)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Failed to write accelerate config at {ACCELERATE_CONFIG_PATH}: {exc}"
+        ) from exc
+    return ACCELERATE_CONFIG_PATH
+
 
 def _run_training_subprocess(
     cmd_args: list,
@@ -226,14 +276,27 @@ def resolve_volume_checkpoint_path(volume_dir: str, model_url: str) -> str | Non
 
     if leaf_has_checkpoint_extension(leaf):
         p = os.path.join(volume_dir, leaf)
-        return p if os.path.isfile(p) else None
+        if os.path.isfile(p):
+            if _usable_volume_checkpoint(p):
+                return p
+            _drop_unusable_volume_checkpoint(p, "file too small")
+        return None
 
     for suffix in (".safetensors", ".ckpt"):
         p = os.path.join(volume_dir, leaf + suffix)
         if os.path.isfile(p):
-            return p
+            if _usable_volume_checkpoint(p):
+                return p
+            _drop_unusable_volume_checkpoint(p, "file too small")
 
-    return _volume_checkpoint_try_legacy_migrate(volume_dir, leaf, os.path.join(volume_dir, leaf))
+    legacy = _volume_checkpoint_try_legacy_migrate(
+        volume_dir, leaf, os.path.join(volume_dir, leaf)
+    )
+    if legacy and _usable_volume_checkpoint(legacy):
+        return legacy
+    if legacy:
+        _drop_unusable_volume_checkpoint(legacy, "file too small")
+    return None
 
 
 def finalize_volume_checkpoint_dest(
@@ -428,7 +491,16 @@ def handler(job):
                 # Delete old file
                 os.remove(original_file_path)
             except Exception as e:
-                return {"error": f"Failed to cache model: {str(e)}"}
+                # Volume may be full; drop any partial cache and train from the download.
+                if os.path.isfile(volume_model_path):
+                    try:
+                        os.remove(volume_model_path)
+                    except OSError:
+                        pass
+                print(
+                    f"runpod-worker-kohya: volume cache failed ({e}); "
+                    f"training with downloaded file: {downloaded_model['file_path']}"
+                )
 
     # Download the zip file
     print(f"Downloading zip file from {job_input['zip_url']}")
@@ -492,10 +564,17 @@ def handler(job):
             "runpod-worker-kohya: mixed-precision fp16, no full_fp16 (bf16 not available on this GPU)"
         )
 
+    try:
+        accelerate_config_path = ensure_accelerate_config(mixed_precision)
+    except RuntimeError as e:
+        return {"error": str(e)}
+
     # Build secure command arguments array (no shell injection possible)
     cmd_args = [
         "accelerate",
         "launch",
+        "--config_file",
+        accelerate_config_path,
         "--num_cpu_threads_per_process=1",
         "sdxl_train_network.py",
         "--enable_bucket",

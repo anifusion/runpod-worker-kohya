@@ -7,10 +7,11 @@
 # Serve the API and don't shutdown the container
 echo "runpod-worker-kohya: Starting RunPod Handler"
 
-# Accelerate reads config from ${HF_HOME}/accelerate at runtime (not ~/.cache when HF_HOME is set).
+# Best-effort volume cache for tools that read HF_HOME; handler.py writes its own /tmp config per job.
 ACCEL_DIR="${HF_HOME:-$HOME/.cache/huggingface}/accelerate"
-mkdir -p "$ACCEL_DIR"
-cat > "$ACCEL_DIR/default_config.yaml" <<'EOF'
+ACCEL_CONFIG="$ACCEL_DIR/default_config.yaml"
+if mkdir -p "$ACCEL_DIR" 2>/dev/null; then
+  if cat > "$ACCEL_CONFIG" <<'EOF'
 compute_environment: LOCAL_MACHINE
 distributed_type: 'NO'
 downcast_bf16: 'no'
@@ -27,6 +28,16 @@ tpu_use_cluster: false
 tpu_use_sudo: false
 use_cpu: false
 EOF
+  then
+    if ! grep -q '^compute_environment:' "$ACCEL_CONFIG"; then
+      echo "runpod-worker-kohya: WARN invalid accelerate config at $ACCEL_CONFIG (handler uses /tmp fallback)"
+    fi
+  else
+    echo "runpod-worker-kohya: WARN could not write accelerate config to $ACCEL_CONFIG (handler uses /tmp fallback)"
+  fi
+else
+  echo "runpod-worker-kohya: WARN could not create $ACCEL_DIR (handler uses /tmp fallback)"
+fi
 
 echo "runpod-worker-kohya: Verifying tokenizer cache..."
 python3 -c "
