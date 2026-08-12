@@ -14,7 +14,7 @@ apt-get autoremove -y && \
 apt-get clean -y && \
 rm -rf /var/lib/apt/lists/*
 
-# Keep this pin at the latest anifusion/sd-scripts http-logging tip (must match builder/requirements.txt).
+# Pinned sd-scripts fork (must match builder/requirements.txt commit).
 git clone https://github.com/anifusion/sd-scripts.git && \
     cd sd-scripts && \
     git checkout 4f08bd287e15b6ffca63a06362e7a2c00ba68c67

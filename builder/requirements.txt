@@ -38,7 +38,7 @@ importlib_metadata==8.6.1
 Jinja2==3.1.5
 jsonschema==4.23.0
 jsonschema-specifications==2024.10.1
-# Keep this pin at the latest anifusion/sd-scripts http-logging tip (must match builder/setup.sh).
+# Pinned sd-scripts fork (must match builder/setup.sh commit).
 -e git+https://github.com/anifusion/sd-scripts.git@4f08bd287e15b6ffca63a06362e7a2c00ba68c67#egg=library
 lightning-utilities==0.12.0
 lion-pytorch==0.0.6
