@@ -7,7 +7,7 @@ pydantic-core==2.27.1
 fastapi==0.115.6
 starlette==0.41.3
 
-runpod==1.8.1
+runpod==1.10.0
 httpx==0.27.0
 httpcore==1.0.0
 absl-py==2.1.0
