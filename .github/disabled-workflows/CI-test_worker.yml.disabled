@@ -31,7 +31,7 @@ jobs:
     steps:
       - name: Deploy Worker
         id: deploy
-        uses: fjogeleit/http-request-action@v1
+        uses: fjogeleit/http-request-action@v2
         with:
           url: "https://api.runpod.ai/v2/${{ vars.RUNNER_24GB }}/run"
           method: "POST"
@@ -43,21 +43,21 @@ jobs:
         id: extract_id
         run: |
           ID=$(echo '${{ steps.deploy.outputs.response }}' | jq -r '.id')
-          echo "::set-output name=runpod_job_id::$ID"
+          echo "runpod_job_id=$ID" >> "$GITHUB_OUTPUT"
 
   run_tests:
     needs: initialize_runner
     runs-on: runpod
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
 
       - name: Run Setup
         run: |
           bash builder/setup.sh
 
       - name: Set up Python 3.10.11 & install dependencies
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: "3.10.11"
 
@@ -83,7 +83,7 @@ jobs:
     steps:
       - name: Get Job Status
         id: get_status
-        uses: fjogeleit/http-request-action@v1
+        uses: fjogeleit/http-request-action@v2
         with:
           url: "https://api.runpod.ai/v2/${{ vars.RUNNER_24GB }}/status/${{ needs.initialize_runner.outputs.id }}"
           method: "GET"
@@ -94,11 +94,11 @@ jobs:
         id: parse_status
         run: |
           STATUS=$(echo '${{ steps.get_status.outputs.response }}' | jq -r '.status')
-          echo "::set-output name=status::$STATUS"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
 
       - name: Shutdown Worker
         if: ${{ steps.parse_status.outputs.status != 'COMPLETED' }}
-        uses: fjogeleit/http-request-action@v1
+        uses: fjogeleit/http-request-action@v2
         with:
           url: "https://api.runpod.ai/v2/${{ vars.RUNNER_24GB }}/cancel/${{ needs.initialize_runner.outputs.id }}"
           method: "POST"

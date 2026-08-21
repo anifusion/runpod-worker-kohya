@@ -466,7 +466,14 @@ def handler(job):
         downloaded_model = {"file_path": volume_model_path}
     else:
         # Download the model file
-        print(f"Downloading model from {model_url}")
+        model_source = urlparse(model_url)
+        print(
+            "Downloading model",
+            {
+                "host": model_source.hostname or "unknown",
+                "file": checkpoint_leaf_from_url(model_url),
+            },
+        )
         try:
             downloaded_model = rp_download.file(job_input["model_url"])
         except Exception as e:
@@ -503,7 +510,14 @@ def handler(job):
                 )
 
     # Download the zip file
-    print(f"Downloading zip file from {job_input['zip_url']}")
+    zip_source = urlparse(job_input["zip_url"])
+    print(
+        "Downloading training archive",
+        {
+            "host": zip_source.hostname or "unknown",
+            "file": sanitize_filename(os.path.basename(zip_source.path)) or "archive",
+        },
+    )
     try:
         downloaded_input = rp_download.file(job_input["zip_url"])
     except Exception as e:
