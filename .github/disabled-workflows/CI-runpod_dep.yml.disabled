@@ -18,9 +18,7 @@ jobs:
     name: Check python requirements file and update
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          persist-credentials: false
+        uses: actions/checkout@v2
 
       - name: Check for new package version and update
         run: |
@@ -46,7 +44,7 @@ jobs:
           sed -i "s/runpod==.*/runpod==$new_version/" ./builder/requirements.txt
 
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v8
+        uses: peter-evans/create-pull-request@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: Update package version
