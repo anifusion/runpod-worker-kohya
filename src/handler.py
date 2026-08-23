@@ -44,7 +44,7 @@ def _usable_volume_checkpoint(path: str) -> bool:
 
 
 def _drop_unusable_volume_checkpoint(path: str, reason: str) -> None:
-    print(f"runpod-worker-kohya: ignoring volume cache {path}: {reason}")
+    print(f"runpod-worker-kohya: ignoring volume cache: {reason}")
     try:
         os.remove(path)
     except OSError:
@@ -257,15 +257,18 @@ def _volume_checkpoint_try_legacy_migrate(
     try:
         ext = sniff_checkpoint_extension(legacy_path)
     except ValueError as e:
-        print(f"runpod-worker-kohya: ignoring unusable legacy cache {legacy_path}: {e}")
+        print(f"runpod-worker-kohya: ignoring unusable legacy cache: {e}")
         return None
     fixed = os.path.join(volume_dir, leaf + ext)
     if fixed != legacy_path and not os.path.isfile(fixed):
         try:
             shutil.copy2(legacy_path, fixed)
-            print(f"runpod-worker-kohya: migrated legacy cache {legacy_path} -> {fixed}")
+            print("runpod-worker-kohya: migrated legacy cache")
         except OSError as src_err:
-            print(f"runpod-worker-kohya: could not migrate legacy cache: {src_err}")
+            print(
+                "runpod-worker-kohya: could not migrate legacy cache: "
+                f"{type(src_err).__name__}"
+            )
             return legacy_path
     return fixed if os.path.isfile(fixed) else legacy_path
 
@@ -350,7 +353,7 @@ def upload_lora_to_bucket(
         secret_access_key = os.environ.get("BUCKET_SECRET_ACCESS_KEY", None)
 
     if not (endpoint_url and access_key_id and secret_access_key):
-        print("No bucket endpoint set, saving to disk folder 'local_upload'")
+        print("No bucket endpoint set, saving to local upload folder")
         os.makedirs("local_upload", exist_ok=True)
         local_upload_location = f"local_upload/{file_name}"
         shutil.copyfile(file_location, local_upload_location)
@@ -462,7 +465,7 @@ def handler(job):
     # Check if model exists in volume directory (correct suffix, or legacy bare name)
     volume_model_path = resolve_volume_checkpoint_path(VOLUME_DIR, model_url)
     if volume_model_path:
-        print(f"Model found in volume, using cached version: {volume_model_path}")
+        print("Model found in volume, using cached version")
         downloaded_model = {"file_path": volume_model_path}
     else:
         # Download the model file
@@ -487,7 +490,7 @@ def handler(job):
                 )
             except ValueError as e:
                 return {"error": f"Downloaded file is not a usable base checkpoint: {e}"}
-            print(f"Moving model to volume for caching: {volume_model_path}")
+            print("Moving model to volume for caching")
             try:
                 shutil.copy(downloaded_model["file_path"], volume_model_path)
                 original_file_path = downloaded_model["file_path"]
