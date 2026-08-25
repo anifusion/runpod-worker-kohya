@@ -12,6 +12,16 @@ Derived from e1pupper's RunPod worker implementation https://github.com/e1pupper
 2) Cache the base model
 3)
 
+## Production deployment
+
+A commit and push do not build a production image or update the RunPod template and endpoint.
+
+1. Run the available focused checks for the changed handler paths and build the Docker image for `linux/amd64`.
+2. Push a uniquely versioned image to the approved registry and record its immutable digest.
+3. In RunPod, update the production template to the reviewed image tag or digest. Sync changed runtime variables from `.env.example` through the approved secret process and keep credentials out of the template description.
+4. Roll the endpoint workers so new workers use the updated template. Confirm the endpoint reports healthy capacity.
+5. Submit a small representative training job and verify completion plus the expected uploaded artifact. Keep the previous image digest and template settings available for rollback until verification passes.
+
 
 ## Inputs
 
