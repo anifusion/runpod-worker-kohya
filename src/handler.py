@@ -408,14 +408,14 @@ def handler(job):
     job_input = job["input"]
 
     if "errors" in (job_input := validate(job_input, INPUT_SCHEMA)):
-        return {"error": job_input["errors"]}
+        return {"error": job_input["errors"], "failure_stage": "input_validation"}
     job_input = job_input["validated_input"]
 
     # Validate URLs
     if not validate_url(job_input["model_url"]):
-        return {"error": "Invalid model URL"}
+        return {"error": "Invalid model URL", "failure_stage": "input_validation"}
     if not validate_url(job_input["zip_url"]):
-        return {"error": "Invalid zip URL"}
+        return {"error": "Invalid zip URL", "failure_stage": "input_validation"}
 
     # Validate and sanitize inputs
     model_url = job_input["model_url"]
@@ -441,7 +441,8 @@ def handler(job):
             job_input[param], min_val, max_val
         ):
             return {
-                "error": f"Invalid numeric parameter: {param} (must be >= {min_val})"
+                "error": f"Invalid numeric parameter: {param} (must be >= {min_val})",
+                "failure_stage": "input_validation",
             }
 
     # Sanitize string parameters
@@ -480,7 +481,7 @@ def handler(job):
         try:
             downloaded_model = rp_download.file(job_input["model_url"])
         except Exception as e:
-            return {"error": f"Failed to download model: {str(e)}"}
+            return {"error": f"Failed to download model: {str(e)}", "failure_stage": "model_download"}
 
         # Make sure we check if the volume directory exists, in that case just use the download file path
         if os.path.exists(VOLUME_DIR):
@@ -489,7 +490,7 @@ def handler(job):
                     VOLUME_DIR, model_url, downloaded_model["file_path"]
                 )
             except ValueError as e:
-                return {"error": f"Downloaded file is not a usable base checkpoint: {e}"}
+                return {"error": f"Downloaded file is not a usable base checkpoint: {e}", "failure_stage": "model_checkpoint"}
             print("Moving model to volume for caching")
             try:
                 shutil.copy(downloaded_model["file_path"], volume_model_path)
@@ -524,7 +525,7 @@ def handler(job):
     try:
         downloaded_input = rp_download.file(job_input["zip_url"])
     except Exception as e:
-        return {"error": f"Failed to download zip file: {str(e)}"}
+        return {"error": f"Failed to download zip file: {str(e)}", "failure_stage": "dataset_download"}
 
     # Clean up any stale training directory from previous jobs on this worker
     if os.path.exists("./training"):
@@ -562,7 +563,8 @@ def handler(job):
     )
     if image_count == 0:
         return {
-            "error": f"No training images found in extracted zip. Files in training dir: {os.listdir(flat_directory)}"
+            "error": f"No training images found in extracted zip. Files in training dir: {os.listdir(flat_directory)}",
+            "failure_stage": "dataset_prepare",
         }
 
     out_id = sanitize_string_param(job_input["out_id"] or job["id"])
@@ -583,7 +585,7 @@ def handler(job):
     try:
         accelerate_config_path = ensure_accelerate_config(mixed_precision)
     except RuntimeError as e:
-        return {"error": str(e)}
+        return {"error": str(e), "failure_stage": "worker_configuration"}
 
     # Build secure command arguments array (no shell injection possible)
     cmd_args = [
@@ -670,14 +672,16 @@ def handler(job):
     try:
         returncode, output_had_nan, output_tail = _run_training_subprocess(cmd_args, 3600)
     except subprocess.TimeoutExpired:
-        return {"error": "Training process timed out"}
+        return {"error": "Training process timed out", "failure_stage": "training_subprocess"}
     except Exception as e:
-        return {"error": f"Training process error: {str(e)}"}
+        return {"error": f"Training process error: {str(e)}", "failure_stage": "training_subprocess"}
 
     if returncode != 0:
         return {
             "error": f"Training process failed: {returncode}",
             "details": output_tail,
+            "failure_stage": "training_subprocess",
+            "exit_code": returncode,
         }
 
     output_path = f"./training/model/{out_id}.safetensors"
@@ -692,11 +696,12 @@ def handler(job):
             "error": (
                 "Training reported non-finite loss (NaN); checkpoint was discarded. "
                 "Try lower learning rates, different images or captions, or a different base model."
-            )
+            ),
+            "failure_stage": "training_subprocess",
         }
 
     if not os.path.exists(output_path):
-        return {"error": f"Training completed but output file not found: {output_path}"}
+        return {"error": f"Training completed but output file not found: {output_path}", "failure_stage": "training_output"}
 
     job_s3_config = job.get("s3Config")
 
@@ -708,7 +713,7 @@ def handler(job):
             bucket_name="lora",
         )
     except Exception as e:
-        return {"error": f"Failed to upload model: {str(e)}"}
+        return {"error": f"Failed to upload model: {str(e)}", "failure_stage": "model_upload"}
 
     return {"lora": uploaded_lora_url}
 
