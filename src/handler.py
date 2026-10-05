@@ -11,6 +11,7 @@ import struct
 import subprocess
 import sys
 import time
+import traceback
 from urllib.parse import urlparse
 
 import runpod
@@ -34,6 +35,81 @@ TRAINING_LOSS_NAN_PATTERN = re.compile(r"avr_loss=nan\b", re.IGNORECASE)
 ACCELERATE_CONFIG_PATH = "/tmp/anifusion_accelerate_default_config.yaml"
 # SDXL checkpoints are multi-GB; tiny files are failed/partial volume caches.
 _MIN_VOLUME_CHECKPOINT_BYTES = 1_000_000
+
+
+def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=False, exit_code=None, job_id=None):
+    """Write bounded diagnostics only to the restricted worker log."""
+    try:
+        diagnostic = {"stage": stage}
+        if isinstance(job_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
+            diagnostic["job_id"] = job_id
+        if isinstance(exit_code, int):
+            diagnostic["exit_code"] = exit_code
+        if isinstance(error, BaseException):
+            diagnostic["type"] = type(error).__name__[:80]
+            try:
+                response = getattr(error, "response", None)
+            except Exception:
+                response = None
+            if isinstance(response, dict):
+                metadata = response.get("ResponseMetadata")
+                if isinstance(metadata, dict):
+                    status = metadata.get("HTTPStatusCode")
+                    if isinstance(status, int) and 100 <= status <= 599:
+                        diagnostic["status"] = status
+                    request_id = metadata.get("RequestId")
+                    if isinstance(request_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{6,128}", request_id):
+                        diagnostic["provider_request_id"] = request_id
+                provider_error = response.get("Error")
+                if isinstance(provider_error, dict) and provider_error.get("Code") in {
+                    "AccessDenied", "NoSuchBucket", "RequestTimeout", "SlowDown", "InternalError"
+                }:
+                    diagnostic["code"] = provider_error["Code"]
+            try:
+                status = getattr(error, "status_code", None)
+            except Exception:
+                status = None
+            if isinstance(status, int) and 100 <= status <= 599:
+                diagnostic["status"] = status
+            if not credential_boundary:
+                diagnostic["message"] = str(error)[:2000]
+                diagnostic["frames"] = [
+                    f"{frame.name}:{frame.lineno}"
+                    for frame in traceback.extract_tb(error.__traceback__)[-6:]
+                ]
+                cause = error.__cause__ or error.__context__
+                if isinstance(cause, BaseException) and cause is not error:
+                    diagnostic["cause_type"] = type(cause).__name__[:80]
+                    diagnostic["cause_message"] = str(cause)[:1000]
+        if isinstance(tail, str) and not credential_boundary:
+            diagnostic["worker_tail"] = tail[-2000:]
+        print("runpod-worker-kohya: failure " + json.dumps(diagnostic, ensure_ascii=True))
+    except Exception:
+        safe_stage = stage if isinstance(stage, str) and re.fullmatch(r"[a-z_]{1,40}", stage) else "unknown"
+        safe_job_id = job_id if isinstance(job_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id) else None
+        print(f"runpod-worker-kohya: failure stage={safe_stage}" + (f" job_id={safe_job_id}" if safe_job_id else ""))
+
+
+def safe_training_failure_label(tail: str, exit_code: int) -> str:
+    """Preserve existing webhook guidance without returning the worker log tail."""
+    lower = tail.lower()
+    if "no training images found" in lower or "training zip would contain no images" in lower:
+        return "No training images found"
+    if "out of memory" in lower or "cuda" in lower:
+        return "CUDA out of memory"
+    if "timeout" in lower or "timed out" in lower:
+        return "Training timed out"
+    if "disk quota exceeded" in lower or "errno 122" in lower:
+        return "Disk quota exceeded"
+    if ("nonetype" in lower and "get" in lower) or "load_config_from_file" in lower or "failed to write accelerate config" in lower:
+        return "Failed to write accelerate config"
+    if any(marker in lower for marker in ("unpicklingerror", "invalid load key", "model_url", "model download", "failed to download model")):
+        return "Base model download failed"
+    if any(marker in lower for marker in ("corrupt", "invalid", "truncated")):
+        return "Training data invalid"
+    if any(marker in lower for marker in ("file name too long", "errno 36", "nametoolong")):
+        return "File name too long"
+    return f"Training process failed: {exit_code}"
 
 
 def _usable_volume_checkpoint(path: str) -> bool:
@@ -86,38 +162,24 @@ def _run_training_subprocess(
     timeout_sec: int,
 ) -> tuple[int, bool, str]:
     """
-    Run training with live stdout (RunPod logs), enforce timeout, detect NaN loss in output.
+    Run training, enforce timeout, detect NaN loss, and keep raw stdout in memory.
     Returns (returncode, saw_nan_in_output, output_tail).
     """
-    # The command carries the training-log bearer token. Keep that exact
-    # credential out of both RunPod stdout and the application webhook tail.
-    try:
-        token_index = cmd_args.index("--http-log-token") + 1
-        log_token = cmd_args[token_index]
-    except (ValueError, IndexError):
-        log_token = None
+    # Provider credentials can appear in subprocess output. Keep raw output in
+    # process memory and expose only a bounded tail through log_worker_failure.
+    sensitive_args = []
+    for option in ("--http-log-token", "--http-log-endpoint"):
+        try:
+            value = cmd_args[cmd_args.index(option) + 1]
+        except (ValueError, IndexError):
+            continue
+        if isinstance(value, str) and value and value != "none":
+            sensitive_args.append(value)
 
-    def redact_log_token(output: str) -> str:
-        if isinstance(log_token, str) and log_token and log_token != "none":
-            output = output.replace(log_token, "[training-log-token-omitted]")
+    def redact_known_credentials(output: str) -> str:
+        for value in sensitive_args:
+            output = output.replace(value, "[credential-omitted]")
         return output
-
-    pending_stdout = ""
-
-    def write_safe_stdout(output: str, final: bool = False) -> None:
-        nonlocal pending_stdout
-        pending_stdout += output
-        if not isinstance(log_token, str) or not log_token or log_token == "none":
-            sys.stdout.write(pending_stdout)
-            pending_stdout = ""
-        else:
-            while (index := pending_stdout.find(log_token)) >= 0:
-                sys.stdout.write(pending_stdout[:index] + "[training-log-token-omitted]")
-                pending_stdout = pending_stdout[index + len(log_token):]
-            safe_length = len(pending_stdout) if final else max(0, len(pending_stdout) - len(log_token) + 1)
-            sys.stdout.write(pending_stdout[:safe_length])
-            pending_stdout = pending_stdout[safe_length:]
-        sys.stdout.flush()
 
     if sys.platform == "win32":
         result = subprocess.run(
@@ -128,9 +190,8 @@ def _run_training_subprocess(
             timeout=timeout_sec,
         )
         out = result.stdout or ""
-        write_safe_stdout(out, final=True)
         saw_nan = bool(TRAINING_LOSS_NAN_PATTERN.search(out))
-        return result.returncode, saw_nan, redact_log_token(out)[-2000:]
+        return result.returncode, saw_nan, redact_known_credentials(out)[-2000:]
 
     proc = subprocess.Popen(
         cmd_args,
@@ -152,7 +213,6 @@ def _run_training_subprocess(
                 proc.wait(timeout=30)
             except Exception:
                 pass
-            write_safe_stdout("", final=True)
             raise subprocess.TimeoutExpired(cmd_args, timeout_sec)
 
         r, _, _ = select.select([proc.stdout], [], [], min(max(remaining, 0), 1.0))
@@ -160,7 +220,6 @@ def _run_training_subprocess(
             chunk = os.read(out_fd, 65536)
             if chunk:
                 decoded = chunk.decode("utf-8", errors="replace")
-                write_safe_stdout(decoded)
                 text_buf += decoded
                 if len(text_buf) > 524288:
                     text_buf = text_buf[-262144:]
@@ -174,15 +233,13 @@ def _run_training_subprocess(
         if not chunk:
             break
         decoded = chunk.decode("utf-8", errors="replace")
-        write_safe_stdout(decoded)
         text_buf += decoded
         if len(text_buf) > 524288:
             text_buf = text_buf[-262144:]
         if TRAINING_LOSS_NAN_PATTERN.search(text_buf):
             saw_nan = True
 
-    write_safe_stdout("", final=True)
-    return proc.wait(), saw_nan, redact_log_token(text_buf)[-2000:]
+    return proc.wait(), saw_nan, redact_known_credentials(text_buf)[-2000:]
 
 
 def cuda_supports_bf16() -> bool:
@@ -287,7 +344,7 @@ def _volume_checkpoint_try_legacy_migrate(
     try:
         ext = sniff_checkpoint_extension(legacy_path)
     except ValueError as e:
-        print(f"runpod-worker-kohya: ignoring unusable legacy cache: {e}")
+        log_worker_failure("legacy_cache", e, credential_boundary=True)
         return None
     fixed = os.path.join(volume_dir, leaf + ext)
     if fixed != legacy_path and not os.path.isfile(fixed):
@@ -295,10 +352,7 @@ def _volume_checkpoint_try_legacy_migrate(
             shutil.copy2(legacy_path, fixed)
             print("runpod-worker-kohya: migrated legacy cache")
         except OSError as src_err:
-            print(
-                "runpod-worker-kohya: could not migrate legacy cache: "
-                f"{type(src_err).__name__}"
-            )
+            log_worker_failure("legacy_cache_migrate", src_err, credential_boundary=True)
             return legacy_path
     return fixed if os.path.isfile(fixed) else legacy_path
 
@@ -438,7 +492,8 @@ def handler(job):
     job_input = job["input"]
 
     if "errors" in (job_input := validate(job_input, INPUT_SCHEMA)):
-        return {"error": job_input["errors"], "failure_stage": "input_validation"}
+        log_worker_failure("input_validation", job_id=job.get("id"))
+        return {"error": "Invalid training input", "failure_stage": "input_validation"}
     job_input = job_input["validated_input"]
 
     # Validate URLs
@@ -500,18 +555,12 @@ def handler(job):
         downloaded_model = {"file_path": volume_model_path}
     else:
         # Download the model file
-        model_source = urlparse(model_url)
-        print(
-            "Downloading model",
-            {
-                "host": model_source.hostname or "unknown",
-                "file": checkpoint_leaf_from_url(model_url),
-            },
-        )
+        print("runpod-worker-kohya: downloading model")
         try:
             downloaded_model = rp_download.file(job_input["model_url"])
         except Exception as e:
-            return {"error": f"Failed to download model: {str(e)}", "failure_stage": "model_download"}
+            log_worker_failure("model_download", e, credential_boundary=True, job_id=job.get("id"))
+            return {"error": "Failed to download model", "failure_stage": "model_download"}
 
         # Make sure we check if the volume directory exists, in that case just use the download file path
         if os.path.exists(VOLUME_DIR):
@@ -520,7 +569,8 @@ def handler(job):
                     VOLUME_DIR, model_url, downloaded_model["file_path"]
                 )
             except ValueError as e:
-                return {"error": f"Downloaded file is not a usable base checkpoint: {e}", "failure_stage": "model_checkpoint"}
+                log_worker_failure("model_checkpoint", e, credential_boundary=True, job_id=job.get("id"))
+                return {"error": "Downloaded file is not a usable base checkpoint", "failure_stage": "model_checkpoint"}
             print("Moving model to volume for caching")
             try:
                 shutil.copy(downloaded_model["file_path"], volume_model_path)
@@ -538,24 +588,16 @@ def handler(job):
                         os.remove(volume_model_path)
                     except OSError:
                         pass
-                print(
-                    f"runpod-worker-kohya: volume cache failed ({e}); "
-                    f"training with downloaded file: {downloaded_model['file_path']}"
-                )
+                log_worker_failure("volume_cache", e, credential_boundary=True, job_id=job.get("id"))
+                print("runpod-worker-kohya: training with downloaded model")
 
     # Download the zip file
-    zip_source = urlparse(job_input["zip_url"])
-    print(
-        "Downloading training archive",
-        {
-            "host": zip_source.hostname or "unknown",
-            "file": sanitize_filename(os.path.basename(zip_source.path)) or "archive",
-        },
-    )
+    print("runpod-worker-kohya: downloading training archive")
     try:
         downloaded_input = rp_download.file(job_input["zip_url"])
     except Exception as e:
-        return {"error": f"Failed to download zip file: {str(e)}", "failure_stage": "dataset_download"}
+        log_worker_failure("dataset_download", e, credential_boundary=True, job_id=job.get("id"))
+        return {"error": "Failed to download training archive", "failure_stage": "dataset_download"}
 
     # Clean up any stale training directory from previous jobs on this worker
     if os.path.exists("./training"):
@@ -592,8 +634,9 @@ def handler(job):
         if os.path.splitext(f)[1].lower() in image_extensions
     )
     if image_count == 0:
+        log_worker_failure("dataset_prepare", job_id=job.get("id"))
         return {
-            "error": f"No training images found in extracted zip. Files in training dir: {os.listdir(flat_directory)}",
+            "error": "No training images found in archive",
             "failure_stage": "dataset_prepare",
         }
 
@@ -615,7 +658,8 @@ def handler(job):
     try:
         accelerate_config_path = ensure_accelerate_config(mixed_precision)
     except RuntimeError as e:
-        return {"error": str(e), "failure_stage": "worker_configuration"}
+        log_worker_failure("worker_configuration", e, job_id=job.get("id"))
+        return {"error": "Failed to write accelerate config", "failure_stage": "worker_configuration"}
 
     # Build secure command arguments array (no shell injection possible)
     cmd_args = [
@@ -701,15 +745,17 @@ def handler(job):
 
     try:
         returncode, output_had_nan, output_tail = _run_training_subprocess(cmd_args, 3600)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        log_worker_failure("training_subprocess", e, credential_boundary=True, job_id=job.get("id"))
         return {"error": "Training process timed out", "failure_stage": "training_subprocess"}
     except Exception as e:
-        return {"error": f"Training process error: {str(e)}", "failure_stage": "training_subprocess"}
+        log_worker_failure("training_subprocess", e, credential_boundary=True, job_id=job.get("id"))
+        return {"error": "Training process failed", "failure_stage": "training_subprocess"}
 
     if returncode != 0:
+        log_worker_failure("training_subprocess", tail=output_tail, exit_code=returncode, job_id=job.get("id"))
         return {
-            "error": f"Training process failed: {returncode}",
-            "details": output_tail,
+            "error": safe_training_failure_label(output_tail, returncode),
             "failure_stage": "training_subprocess",
             "exit_code": returncode,
         }
@@ -731,7 +777,8 @@ def handler(job):
         }
 
     if not os.path.exists(output_path):
-        return {"error": f"Training completed but output file not found: {output_path}", "failure_stage": "training_output"}
+        log_worker_failure("training_output", job_id=job.get("id"))
+        return {"error": "Training completed without an output model", "failure_stage": "training_output"}
 
     job_s3_config = job.get("s3Config")
 
@@ -743,7 +790,8 @@ def handler(job):
             bucket_name="lora",
         )
     except Exception as e:
-        return {"error": f"Failed to upload model: {str(e)}", "failure_stage": "model_upload"}
+        log_worker_failure("model_upload", e, credential_boundary=True, job_id=job.get("id"))
+        return {"error": "Failed to upload model", "failure_stage": "model_upload"}
 
     return {"lora": uploaded_lora_url}
 
