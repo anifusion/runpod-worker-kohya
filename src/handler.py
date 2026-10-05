@@ -89,6 +89,36 @@ def _run_training_subprocess(
     Run training with live stdout (RunPod logs), enforce timeout, detect NaN loss in output.
     Returns (returncode, saw_nan_in_output, output_tail).
     """
+    # The command carries the training-log bearer token. Keep that exact
+    # credential out of both RunPod stdout and the application webhook tail.
+    try:
+        token_index = cmd_args.index("--http-log-token") + 1
+        log_token = cmd_args[token_index]
+    except (ValueError, IndexError):
+        log_token = None
+
+    def redact_log_token(output: str) -> str:
+        if isinstance(log_token, str) and log_token and log_token != "none":
+            output = output.replace(log_token, "[training-log-token-omitted]")
+        return output
+
+    pending_stdout = ""
+
+    def write_safe_stdout(output: str, final: bool = False) -> None:
+        nonlocal pending_stdout
+        pending_stdout += output
+        if not isinstance(log_token, str) or not log_token or log_token == "none":
+            sys.stdout.write(pending_stdout)
+            pending_stdout = ""
+        else:
+            while (index := pending_stdout.find(log_token)) >= 0:
+                sys.stdout.write(pending_stdout[:index] + "[training-log-token-omitted]")
+                pending_stdout = pending_stdout[index + len(log_token):]
+            safe_length = len(pending_stdout) if final else max(0, len(pending_stdout) - len(log_token) + 1)
+            sys.stdout.write(pending_stdout[:safe_length])
+            pending_stdout = pending_stdout[safe_length:]
+        sys.stdout.flush()
+
     if sys.platform == "win32":
         result = subprocess.run(
             cmd_args,
@@ -98,9 +128,9 @@ def _run_training_subprocess(
             timeout=timeout_sec,
         )
         out = result.stdout or ""
-        print(out, end="")
+        write_safe_stdout(out, final=True)
         saw_nan = bool(TRAINING_LOSS_NAN_PATTERN.search(out))
-        return result.returncode, saw_nan, out[-2000:]
+        return result.returncode, saw_nan, redact_log_token(out)[-2000:]
 
     proc = subprocess.Popen(
         cmd_args,
@@ -122,6 +152,7 @@ def _run_training_subprocess(
                 proc.wait(timeout=30)
             except Exception:
                 pass
+            write_safe_stdout("", final=True)
             raise subprocess.TimeoutExpired(cmd_args, timeout_sec)
 
         r, _, _ = select.select([proc.stdout], [], [], min(max(remaining, 0), 1.0))
@@ -129,8 +160,7 @@ def _run_training_subprocess(
             chunk = os.read(out_fd, 65536)
             if chunk:
                 decoded = chunk.decode("utf-8", errors="replace")
-                sys.stdout.write(decoded)
-                sys.stdout.flush()
+                write_safe_stdout(decoded)
                 text_buf += decoded
                 if len(text_buf) > 524288:
                     text_buf = text_buf[-262144:]
@@ -144,15 +174,15 @@ def _run_training_subprocess(
         if not chunk:
             break
         decoded = chunk.decode("utf-8", errors="replace")
-        sys.stdout.write(decoded)
-        sys.stdout.flush()
+        write_safe_stdout(decoded)
         text_buf += decoded
         if len(text_buf) > 524288:
             text_buf = text_buf[-262144:]
         if TRAINING_LOSS_NAN_PATTERN.search(text_buf):
             saw_nan = True
 
-    return proc.wait(), saw_nan, text_buf[-2000:]
+    write_safe_stdout("", final=True)
+    return proc.wait(), saw_nan, redact_log_token(text_buf)[-2000:]
 
 
 def cuda_supports_bf16() -> bool:
