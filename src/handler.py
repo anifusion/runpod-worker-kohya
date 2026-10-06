@@ -31,7 +31,7 @@ LORA_UPLOAD_MAX_POOL_CONNECTIONS = 16
 # Kohya tqdm reports moving-average loss as "avr_loss=..."; NaN runs must not ship weights.
 TRAINING_LOSS_NAN_PATTERN = re.compile(r"avr_loss=nan\b", re.IGNORECASE)
 
-# Use /tmp so accelerate config is never blocked by a full RunPod volume (HF_HOME).
+# Use /tmp so accelerate config is never blocked by a full Runpod volume (HF_HOME).
 ACCELERATE_CONFIG_PATH = "/tmp/anifusion_accelerate_default_config.yaml"
 # SDXL checkpoints are multi-GB; tiny files are failed/partial volume caches.
 _MIN_VOLUME_CHECKPOINT_BYTES = 1_000_000

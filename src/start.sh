@@ -5,7 +5,7 @@
 #export LD_PRELOAD="${TCMALLOC}"
 
 # Serve the API and don't shutdown the container
-echo "runpod-worker-kohya: Starting RunPod Handler"
+echo "runpod-worker-kohya: Starting Runpod Handler"
 
 # Best-effort volume cache for tools that read HF_HOME; handler.py writes its own /tmp config per job.
 ACCEL_DIR="${HF_HOME:-$HOME/.cache/huggingface}/accelerate"

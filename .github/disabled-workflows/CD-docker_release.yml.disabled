@@ -1,4 +1,4 @@
-# DISABLED: Archived — used secrets.DOCKERHUB_*; RunPod builds from git instead.
+# DISABLED: Archived — used secrets.DOCKERHUB_*; Runpod builds from git instead.
 # Restore to .github/workflows/CD-docker_release.yml to re-enable Docker Hub push on release.
 
 name: CD | Release Docker Image

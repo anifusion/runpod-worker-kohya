@@ -1,4 +1,4 @@
-# DISABLED: Archived — used secrets.DOCKERHUB_* and vars.DOCKERHUB_*; RunPod builds from git instead.
+# DISABLED: Archived — used secrets.DOCKERHUB_* and vars.DOCKERHUB_*; Runpod builds from git instead.
 # Restore to .github/workflows/CD-docker_dev.yml to re-enable Docker Hub push on main.
 
 name: CD | Dev Docker Image

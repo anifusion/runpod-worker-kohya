@@ -9,7 +9,7 @@ name: CI | Test Worker
 # - GH_PAT: A GitHub Personal Access Token with access to the repository
 
 # Requires the following variables:
-# - RUNNER_24GB: RunPod endpoint id used to provision the test runner and to cancel jobs (must match deploy/status/cancel)
+# - RUNNER_24GB: Runpod endpoint id used to provision the test runner and to cancel jobs (must match deploy/status/cancel)
 
 on:
   push:

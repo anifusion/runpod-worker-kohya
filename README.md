@@ -6,7 +6,7 @@
 </div>
 
 This is a implementation https://github.com/kohya-ss/sd-scripts
-Derived from e1pupper's RunPod worker implementation https://github.com/e1pupper/loratrainer
+Derived from e1pupper's Runpod worker implementation https://github.com/e1pupper/loratrainer
 
 1) Clone this repo
 2) Cache the base model
@@ -14,7 +14,7 @@ Derived from e1pupper's RunPod worker implementation https://github.com/e1pupper
 
 ## Deployment
 
-RunPod can build from a connected GitHub repository automatically after a push. Check the resulting build and endpoint before running jobs.
+Runpod can build from a connected GitHub repository automatically after a push. Check the resulting build and endpoint before running jobs.
 
 ## Inputs
 
