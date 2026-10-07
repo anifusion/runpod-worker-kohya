@@ -83,7 +83,7 @@ torchvision==0.18.1
 tqdm==4.67.1
 transformers==4.44.0
 triton==2.3.1
-typing_extensions==4.12.2
+typing_extensions==4.13.2
 tzdata==2025.1
 urllib3==2.3.0
 voluptuous==0.13.1

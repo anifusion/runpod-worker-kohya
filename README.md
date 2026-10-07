@@ -15,6 +15,8 @@ Derived from e1pupper's Runpod worker implementation https://github.com/e1pupper
 
 Runpod can build from a connected GitHub repository automatically after a push.
 
+For a local build, use `docker build --platform linux/amd64 -t runpod-worker-kohya:local .`. The pinned Triton version does not provide a compatible arm64 wheel.
+
 **Manual action after each push:** Open the endpoint's build history in Runpod. Confirm that the build for the pushed commit is marked `Completed` and the endpoint uses that image before running jobs.
 
 ## Inputs
