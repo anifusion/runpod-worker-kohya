@@ -72,7 +72,7 @@ def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=Fals
             if isinstance(status, int) and 100 <= status <= 599:
                 diagnostic["status"] = status
             if not credential_boundary:
-                diagnostic["message"] = str(error)[:2000]
+                diagnostic["message"] = re.sub(r"\r\n|[\r\n\u2028\u2029]", " | ", str(error)[:2000])[:2000]
                 diagnostic["frames"] = [
                     f"{frame.name}:{frame.lineno}"
                     for frame in traceback.extract_tb(error.__traceback__)[-6:]
@@ -80,9 +80,9 @@ def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=Fals
                 cause = error.__cause__ or error.__context__
                 if isinstance(cause, BaseException) and cause is not error:
                     diagnostic["cause_type"] = type(cause).__name__[:80]
-                    diagnostic["cause_message"] = str(cause)[:1000]
+                    diagnostic["cause_message"] = re.sub(r"\r\n|[\r\n\u2028\u2029]", " | ", str(cause)[:1000])[:1000]
         if isinstance(tail, str) and not credential_boundary:
-            diagnostic["worker_tail"] = tail[-2000:]
+            diagnostic["worker_tail"] = re.sub(r"\r\n|[\r\n\u2028\u2029]", " | ", tail[-2000:])[-2000:]
         print("runpod-worker-kohya: failure " + json.dumps(diagnostic, ensure_ascii=True))
     except Exception:
         safe_stage = stage if isinstance(stage, str) and re.fullmatch(r"[a-z_]{1,40}", stage) else "unknown"

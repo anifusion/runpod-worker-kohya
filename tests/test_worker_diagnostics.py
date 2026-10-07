@@ -56,6 +56,33 @@ class WorkerDiagnosticsTests(unittest.TestCase):
         self.assertIn('"message": "training failed"', output[0])
         self.assertIn('"frames":', output[0])
 
+    def test_multiline_failure_keeps_one_readable_log_line(self):
+        namespace, output = load_functions()
+        try:
+            try:
+                raise RuntimeError("storage\r\nunavailable")
+            except RuntimeError as cause:
+                raise ValueError("training failed\nretry") from cause
+        except ValueError as error:
+            namespace["log_worker_failure"](
+                "training_subprocess", error, tail="worker\nfailed"
+            )
+        line = output[0]
+        self.assertIn('"message": "training failed | retry"', line)
+        self.assertIn('"cause_message": "storage | unavailable"', line)
+        self.assertIn('"worker_tail": "worker | failed"', line)
+        self.assertIn('"frames":', line)
+        self.assertNotIn("\\n", line)
+        self.assertNotIn("\n", line)
+
+    def test_expanded_worker_tail_stays_bounded(self):
+        namespace, output = load_functions()
+        namespace["log_worker_failure"]("training_subprocess", tail="a\n" * 2000)
+        line = output[0]
+        record = json.loads(line[line.index("{"):])
+        self.assertEqual(len(record["worker_tail"]), 2000)
+        self.assertNotIn("\\n", line)
+
     def test_training_tail_stays_out_of_live_stdout_and_job_output(self):
         fake_subprocess = types.SimpleNamespace(
             PIPE=subprocess.PIPE,
