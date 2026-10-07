@@ -15,7 +15,7 @@ TREE = ast.parse(SOURCE.read_text(encoding="utf-8"))
 FUNCTIONS = [
     node for node in TREE.body
     if isinstance(node, ast.FunctionDef)
-    and node.name in {"log_worker_failure", "_run_training_subprocess", "safe_training_failure_label"}
+    and node.name in {"_single_line_text", "log_worker_failure", "_run_training_subprocess", "safe_training_failure_label"}
 ]
 
 
@@ -60,17 +60,17 @@ class WorkerDiagnosticsTests(unittest.TestCase):
         namespace, output = load_functions()
         try:
             try:
-                raise RuntimeError("storage\r\nunavailable")
+                raise RuntimeError("storage \r\n unavailable")
             except RuntimeError as cause:
-                raise ValueError("training failed\nretry") from cause
+                raise ValueError("training  failed \n retry") from cause
         except ValueError as error:
             namespace["log_worker_failure"](
-                "training_subprocess", error, tail="worker\nfailed"
+                "training_subprocess", error, tail="worker \n failed"
             )
         line = output[0]
-        self.assertIn('"message": "training failed | retry"', line)
-        self.assertIn('"cause_message": "storage | unavailable"', line)
-        self.assertIn('"worker_tail": "worker | failed"', line)
+        self.assertIn('"message": "training  failed retry"', line)
+        self.assertIn('"cause_message": "storage unavailable"', line)
+        self.assertIn('"worker_tail": "worker failed"', line)
         self.assertIn('"frames":', line)
         self.assertNotIn("\\n", line)
         self.assertNotIn("\n", line)

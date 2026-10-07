@@ -37,6 +37,24 @@ ACCELERATE_CONFIG_PATH = "/tmp/anifusion_accelerate_default_config.yaml"
 _MIN_VOLUME_CHECKPOINT_BYTES = 1_000_000
 
 
+def _single_line_text(text):
+    lines = re.split(r"\r\n|[\r\n\u2028\u2029]", text)
+    if len(lines) == 1:
+        return text
+    last = len(lines) - 1
+    parts = []
+    for index, line in enumerate(lines):
+        if index == 0:
+            line = line.rstrip(" \t\v\f")
+        elif index == last:
+            line = line.lstrip(" \t\v\f")
+        else:
+            line = line.strip(" \t\v\f")
+        if line or index in (0, last):
+            parts.append(line)
+    return " ".join(parts)
+
+
 def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=False, exit_code=None, job_id=None):
     """Write bounded diagnostics only to the restricted worker log."""
     try:
@@ -72,7 +90,7 @@ def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=Fals
             if isinstance(status, int) and 100 <= status <= 599:
                 diagnostic["status"] = status
             if not credential_boundary:
-                diagnostic["message"] = re.sub(r"\r\n|[\r\n\u2028\u2029]", " | ", str(error)[:2000])[:2000]
+                diagnostic["message"] = _single_line_text(str(error)[:2000])[:2000]
                 diagnostic["frames"] = [
                     f"{frame.name}:{frame.lineno}"
                     for frame in traceback.extract_tb(error.__traceback__)[-6:]
@@ -80,9 +98,9 @@ def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=Fals
                 cause = error.__cause__ or error.__context__
                 if isinstance(cause, BaseException) and cause is not error:
                     diagnostic["cause_type"] = type(cause).__name__[:80]
-                    diagnostic["cause_message"] = re.sub(r"\r\n|[\r\n\u2028\u2029]", " | ", str(cause)[:1000])[:1000]
+                    diagnostic["cause_message"] = _single_line_text(str(cause)[:1000])[:1000]
         if isinstance(tail, str) and not credential_boundary:
-            diagnostic["worker_tail"] = re.sub(r"\r\n|[\r\n\u2028\u2029]", " | ", tail[-2000:])[-2000:]
+            diagnostic["worker_tail"] = _single_line_text(tail[-2000:])[-2000:]
         print("runpod-worker-kohya: failure " + json.dumps(diagnostic, ensure_ascii=True))
     except Exception:
         safe_stage = stage if isinstance(stage, str) and re.fullmatch(r"[a-z_]{1,40}", stage) else "unknown"
