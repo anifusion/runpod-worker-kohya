@@ -85,6 +85,8 @@ class WorkerDiagnosticsTests(unittest.TestCase):
         examples = [
             ("No training images found in archive", "No training images found"),
             ("CUDA out of memory while reading secret-input", "CUDA out of memory"),
+            ("CUDA error: an illegal memory access was encountered secret-input", "Training process failed: 1"),
+            ("CUDA out of memory followed by illegal memory access secret-input", "Training process failed: 1"),
             ("training process timed out secret-input", "Training timed out"),
             ("_pickle.UnpicklingError: invalid load key secret-input", "Base model download failed"),
             ("OSError: [Errno 122] Disk quota exceeded secret-input", "Disk quota exceeded"),

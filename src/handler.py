@@ -93,9 +93,11 @@ def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=Fals
 def safe_training_failure_label(tail: str, exit_code: int) -> str:
     """Preserve existing webhook guidance without returning the worker log tail."""
     lower = tail.lower()
+    if "illegal memory access" in lower:
+        return f"Training process failed: {exit_code}"
     if "no training images found" in lower or "training zip would contain no images" in lower:
         return "No training images found"
-    if "out of memory" in lower or "cuda" in lower:
+    if "out of memory" in lower:
         return "CUDA out of memory"
     if "timeout" in lower or "timed out" in lower:
         return "Training timed out"

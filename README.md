@@ -10,11 +10,12 @@ Derived from e1pupper's Runpod worker implementation https://github.com/e1pupper
 
 1) Clone this repo
 2) Cache the base model
-3)
 
 ## Deployment
 
-Runpod can build from a connected GitHub repository automatically after a push. Check the resulting build and endpoint before running jobs.
+Runpod can build from a connected GitHub repository automatically after a push.
+
+**Manual action after each push:** Open the endpoint's build history in Runpod. Confirm that the build for the pushed commit is marked `Completed` and the endpoint uses that image before running jobs.
 
 ## Inputs
 
