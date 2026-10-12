@@ -46,6 +46,21 @@ class WorkerDiagnosticsTests(unittest.TestCase):
         self.assertIn('"stage": "model_download"', output[0])
         self.assertIn('"job_id": "job_123"', output[0])
         self.assertNotIn("signed-url-and-private-content", output[0])
+        self.assertEqual(
+            json.loads(output[1].split("safe_event ", 1)[1]),
+            {"event": "worker_failure", "stage": "model_download", "job_id": "job_123"},
+        )
+
+    def test_safe_event_omits_private_exception_and_bad_identifier(self):
+        namespace, output = load_functions()
+        namespace["log_worker_failure"](
+            "training_subprocess", RuntimeError("secret\nprivate prompt"), job_id="private@example.test"
+        )
+        self.assertEqual(
+            json.loads(output[1].split("safe_event ", 1)[1]),
+            {"event": "worker_failure", "stage": "training_subprocess"},
+        )
+        self.assertEqual(output[1].count("\n"), 0)
 
     def test_internal_failure_keeps_bounded_message_and_stack(self):
         namespace, output = load_functions()

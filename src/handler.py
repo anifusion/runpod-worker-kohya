@@ -102,10 +102,21 @@ def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=Fals
         if isinstance(tail, str) and not credential_boundary:
             diagnostic["worker_tail"] = _single_line_text(tail[-2000:])[-2000:]
         print("runpod-worker-kohya: failure " + json.dumps(diagnostic, ensure_ascii=True))
+        safe_stage = stage if isinstance(stage, str) and re.fullmatch(r"[a-z_]{1,40}", stage) else "unknown"
+        safe_event = {"event": "worker_failure", "stage": safe_stage}
+        if "job_id" in diagnostic:
+            safe_event["job_id"] = diagnostic["job_id"]
+        if "status" in diagnostic:
+            safe_event["status"] = diagnostic["status"]
+        print("runpod-worker-kohya: safe_event " + json.dumps(safe_event, ensure_ascii=True))
     except Exception:
         safe_stage = stage if isinstance(stage, str) and re.fullmatch(r"[a-z_]{1,40}", stage) else "unknown"
         safe_job_id = job_id if isinstance(job_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id) else None
         print(f"runpod-worker-kohya: failure stage={safe_stage}" + (f" job_id={safe_job_id}" if safe_job_id else ""))
+        safe_event = {"event": "worker_failure", "stage": safe_stage}
+        if safe_job_id:
+            safe_event["job_id"] = safe_job_id
+        print("runpod-worker-kohya: safe_event " + json.dumps(safe_event, ensure_ascii=True))
 
 
 def safe_training_failure_label(tail: str, exit_code: int) -> str:
