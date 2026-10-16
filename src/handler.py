@@ -35,36 +35,36 @@ TRAINING_LOSS_NAN_PATTERN = re.compile(r"avr_loss=nan\b", re.IGNORECASE)
 ACCELERATE_CONFIG_PATH = "/tmp/anifusion_accelerate_default_config.yaml"
 # SDXL checkpoints are multi-GB; tiny files are failed/partial volume caches.
 _MIN_VOLUME_CHECKPOINT_BYTES = 1_000_000
+_TRAINING_DIAGNOSTIC_TAIL_CHARS = 131072
 
 
-def _single_line_text(text):
-    lines = re.split(r"\r\n|[\r\n\u2028\u2029]", text)
-    if len(lines) == 1:
-        return text
-    last = len(lines) - 1
-    parts = []
-    for index, line in enumerate(lines):
-        if index == 0:
-            line = line.rstrip(" \t\v\f")
-        elif index == last:
-            line = line.lstrip(" \t\v\f")
-        else:
-            line = line.strip(" \t\v\f")
-        if line or index in (0, last):
-            parts.append(line)
-    return " ".join(parts)
+class TrainingSubprocessTimeout(Exception):
+    def __init__(self, safe_tail):
+        super().__init__("Training subprocess exceeded its time limit")
+        self.safe_tail = safe_tail
 
 
-def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=False, exit_code=None, job_id=None):
-    """Write bounded diagnostics only to the restricted worker log."""
+def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=False, exit_code=None,
+                       job_id=None, code=None, parameter=None):
+    """Build a bounded diagnostic for restricted worker and application logs."""
     try:
         diagnostic = {"stage": stage}
         if isinstance(job_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
             diagnostic["job_id"] = job_id
         if isinstance(exit_code, int):
             diagnostic["exit_code"] = exit_code
+        if code in {"InvalidModelUrl", "InvalidZipUrl", "InvalidNumericParameter"}:
+            diagnostic["code"] = code
+        if isinstance(parameter, str) and re.fullmatch(r"[a-z_]{1,40}", parameter):
+            diagnostic["parameter"] = parameter
         if isinstance(error, BaseException):
             diagnostic["type"] = type(error).__name__[:80]
+            try:
+                errno = getattr(error, "errno", None)
+            except Exception:
+                errno = None
+            if isinstance(errno, int) and 0 <= errno <= 4095:
+                diagnostic["errno"] = errno
             try:
                 response = getattr(error, "response", None)
             except Exception:
@@ -79,10 +79,9 @@ def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=Fals
                     if isinstance(request_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{6,128}", request_id):
                         diagnostic["provider_request_id"] = request_id
                 provider_error = response.get("Error")
-                if isinstance(provider_error, dict) and provider_error.get("Code") in {
-                    "AccessDenied", "NoSuchBucket", "RequestTimeout", "SlowDown", "InternalError"
-                }:
-                    diagnostic["code"] = provider_error["Code"]
+                provider_code = provider_error.get("Code") if isinstance(provider_error, dict) else None
+                if isinstance(provider_code, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", provider_code):
+                    diagnostic["code"] = provider_code
             try:
                 status = getattr(error, "status_code", None)
             except Exception:
@@ -90,7 +89,7 @@ def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=Fals
             if isinstance(status, int) and 100 <= status <= 599:
                 diagnostic["status"] = status
             if not credential_boundary:
-                diagnostic["message"] = _single_line_text(str(error)[:2000])[:2000]
+                diagnostic["message"] = str(error)[:16000]
                 diagnostic["frames"] = [
                     f"{frame.name}:{frame.lineno}"
                     for frame in traceback.extract_tb(error.__traceback__)[-6:]
@@ -98,10 +97,16 @@ def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=Fals
                 cause = error.__cause__ or error.__context__
                 if isinstance(cause, BaseException) and cause is not error:
                     diagnostic["cause_type"] = type(cause).__name__[:80]
-                    diagnostic["cause_message"] = _single_line_text(str(cause)[:1000])[:1000]
+                    diagnostic["cause_message"] = str(cause)[:8000]
         if isinstance(tail, str) and not credential_boundary:
-            diagnostic["worker_tail"] = _single_line_text(tail[-2000:])[-2000:]
-        print("runpod-worker-kohya: failure " + json.dumps(diagnostic, ensure_ascii=True))
+            diagnostic["worker_tail"] = tail[-_TRAINING_DIAGNOSTIC_TAIL_CHARS:]
+        worker_log_diagnostic = dict(diagnostic)
+        for key in ("message", "cause_message", "worker_tail"):
+            value = worker_log_diagnostic.get(key)
+            if isinstance(value, str) and len(value) > 750:
+                worker_log_diagnostic[key] = value[-750:]
+                worker_log_diagnostic[key + "_chars"] = len(value)
+        print("runpod-worker-kohya: failure " + json.dumps(worker_log_diagnostic, ensure_ascii=True))
         safe_stage = stage if isinstance(stage, str) and re.fullmatch(r"[a-z_]{1,40}", stage) else "unknown"
         safe_event = {"event": "worker_failure", "stage": safe_stage}
         if "job_id" in diagnostic:
@@ -109,6 +114,7 @@ def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=Fals
         if "status" in diagnostic:
             safe_event["status"] = diagnostic["status"]
         print("runpod-worker-kohya: safe_event " + json.dumps(safe_event, ensure_ascii=True))
+        return diagnostic
     except Exception:
         safe_stage = stage if isinstance(stage, str) and re.fullmatch(r"[a-z_]{1,40}", stage) else "unknown"
         safe_job_id = job_id if isinstance(job_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id) else None
@@ -117,6 +123,7 @@ def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=Fals
         if safe_job_id:
             safe_event["job_id"] = safe_job_id
         print("runpod-worker-kohya: safe_event " + json.dumps(safe_event, ensure_ascii=True))
+        return {"stage": safe_stage, **({"job_id": safe_job_id} if safe_job_id else {})}
 
 
 def safe_training_failure_label(tail: str, exit_code: int) -> str:
@@ -213,16 +220,22 @@ def _run_training_subprocess(
         return output
 
     if sys.platform == "win32":
-        result = subprocess.run(
-            cmd_args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=timeout_sec,
-        )
+        try:
+            result = subprocess.run(
+                cmd_args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout_sec,
+            )
+        except subprocess.TimeoutExpired as error:
+            output = error.stdout or error.output or ""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            raise TrainingSubprocessTimeout(redact_known_credentials(output)[-_TRAINING_DIAGNOSTIC_TAIL_CHARS:]) from None
         out = result.stdout or ""
         saw_nan = bool(TRAINING_LOSS_NAN_PATTERN.search(out))
-        return result.returncode, saw_nan, redact_known_credentials(out)[-2000:]
+        return result.returncode, saw_nan, redact_known_credentials(out)[-_TRAINING_DIAGNOSTIC_TAIL_CHARS:]
 
     proc = subprocess.Popen(
         cmd_args,
@@ -244,7 +257,7 @@ def _run_training_subprocess(
                 proc.wait(timeout=30)
             except Exception:
                 pass
-            raise subprocess.TimeoutExpired(cmd_args, timeout_sec)
+            raise TrainingSubprocessTimeout(redact_known_credentials(text_buf)[-_TRAINING_DIAGNOSTIC_TAIL_CHARS:])
 
         r, _, _ = select.select([proc.stdout], [], [], min(max(remaining, 0), 1.0))
         if proc.stdout in r:
@@ -270,7 +283,7 @@ def _run_training_subprocess(
         if TRAINING_LOSS_NAN_PATTERN.search(text_buf):
             saw_nan = True
 
-    return proc.wait(), saw_nan, redact_known_credentials(text_buf)[-2000:]
+    return proc.wait(), saw_nan, redact_known_credentials(text_buf)[-_TRAINING_DIAGNOSTIC_TAIL_CHARS:]
 
 
 def cuda_supports_bf16() -> bool:
@@ -520,18 +533,25 @@ def validate_numeric_param(param_value, min_val=None, max_val=None):
 
 
 def handler(job):
-    job_input = job["input"]
+    try:
+        job_input = job["input"]
+        job_input = validate(job_input, INPUT_SCHEMA)
+    except Exception as error:
+        diagnostic = log_worker_failure("input_validation", error, credential_boundary=True, job_id=job.get("id"))
+        return {"error": "Invalid training input", "failure_stage": "input_validation", "diagnostic": diagnostic}
 
-    if "errors" in (job_input := validate(job_input, INPUT_SCHEMA)):
-        log_worker_failure("input_validation", job_id=job.get("id"))
-        return {"error": "Invalid training input", "failure_stage": "input_validation"}
+    if not isinstance(job_input, dict) or "errors" in job_input or not isinstance(job_input.get("validated_input"), dict):
+        diagnostic = log_worker_failure("input_validation", job_id=job.get("id"))
+        return {"error": "Invalid training input", "failure_stage": "input_validation", "diagnostic": diagnostic}
     job_input = job_input["validated_input"]
 
     # Validate URLs
     if not validate_url(job_input["model_url"]):
-        return {"error": "Invalid model URL", "failure_stage": "input_validation"}
+        diagnostic = log_worker_failure("input_validation", job_id=job.get("id"), code="InvalidModelUrl")
+        return {"error": "Invalid model URL", "failure_stage": "input_validation", "diagnostic": diagnostic}
     if not validate_url(job_input["zip_url"]):
-        return {"error": "Invalid zip URL", "failure_stage": "input_validation"}
+        diagnostic = log_worker_failure("input_validation", job_id=job.get("id"), code="InvalidZipUrl")
+        return {"error": "Invalid zip URL", "failure_stage": "input_validation", "diagnostic": diagnostic}
 
     # Validate and sanitize inputs
     model_url = job_input["model_url"]
@@ -556,9 +576,12 @@ def handler(job):
         if param in job_input and not validate_numeric_param(
             job_input[param], min_val, max_val
         ):
+            diagnostic = log_worker_failure("input_validation", job_id=job.get("id"),
+                                            code="InvalidNumericParameter", parameter=param)
             return {
                 "error": f"Invalid numeric parameter: {param} (must be >= {min_val})",
                 "failure_stage": "input_validation",
+                "diagnostic": diagnostic,
             }
 
     # Sanitize string parameters
@@ -590,8 +613,8 @@ def handler(job):
         try:
             downloaded_model = rp_download.file(job_input["model_url"])
         except Exception as e:
-            log_worker_failure("model_download", e, credential_boundary=True, job_id=job.get("id"))
-            return {"error": "Failed to download model", "failure_stage": "model_download"}
+            diagnostic = log_worker_failure("model_download", e, credential_boundary=True, job_id=job.get("id"))
+            return {"error": "Failed to download model", "failure_stage": "model_download", "diagnostic": diagnostic}
 
         # Make sure we check if the volume directory exists, in that case just use the download file path
         if os.path.exists(VOLUME_DIR):
@@ -600,8 +623,8 @@ def handler(job):
                     VOLUME_DIR, model_url, downloaded_model["file_path"]
                 )
             except ValueError as e:
-                log_worker_failure("model_checkpoint", e, credential_boundary=True, job_id=job.get("id"))
-                return {"error": "Downloaded file is not a usable base checkpoint", "failure_stage": "model_checkpoint"}
+                diagnostic = log_worker_failure("model_checkpoint", e, credential_boundary=True, job_id=job.get("id"))
+                return {"error": "Downloaded file is not a usable base checkpoint", "failure_stage": "model_checkpoint", "diagnostic": diagnostic}
             print("Moving model to volume for caching")
             try:
                 shutil.copy(downloaded_model["file_path"], volume_model_path)
@@ -627,8 +650,8 @@ def handler(job):
     try:
         downloaded_input = rp_download.file(job_input["zip_url"])
     except Exception as e:
-        log_worker_failure("dataset_download", e, credential_boundary=True, job_id=job.get("id"))
-        return {"error": "Failed to download training archive", "failure_stage": "dataset_download"}
+        diagnostic = log_worker_failure("dataset_download", e, credential_boundary=True, job_id=job.get("id"))
+        return {"error": "Failed to download training archive", "failure_stage": "dataset_download", "diagnostic": diagnostic}
 
     # Clean up any stale training directory from previous jobs on this worker
     if os.path.exists("./training"):
@@ -665,10 +688,11 @@ def handler(job):
         if os.path.splitext(f)[1].lower() in image_extensions
     )
     if image_count == 0:
-        log_worker_failure("dataset_prepare", job_id=job.get("id"))
+        diagnostic = log_worker_failure("dataset_prepare", job_id=job.get("id"))
         return {
             "error": "No training images found in archive",
             "failure_stage": "dataset_prepare",
+            "diagnostic": diagnostic,
         }
 
     out_id = sanitize_string_param(job_input["out_id"] or job["id"])
@@ -689,8 +713,8 @@ def handler(job):
     try:
         accelerate_config_path = ensure_accelerate_config(mixed_precision)
     except RuntimeError as e:
-        log_worker_failure("worker_configuration", e, job_id=job.get("id"))
-        return {"error": "Failed to write accelerate config", "failure_stage": "worker_configuration"}
+        diagnostic = log_worker_failure("worker_configuration", e, job_id=job.get("id"))
+        return {"error": "Failed to write accelerate config", "failure_stage": "worker_configuration", "diagnostic": diagnostic}
 
     # Build secure command arguments array (no shell injection possible)
     cmd_args = [
@@ -776,19 +800,20 @@ def handler(job):
 
     try:
         returncode, output_had_nan, output_tail = _run_training_subprocess(cmd_args, 3600)
-    except subprocess.TimeoutExpired as e:
-        log_worker_failure("training_subprocess", e, credential_boundary=True, job_id=job.get("id"))
-        return {"error": "Training process timed out", "failure_stage": "training_subprocess"}
+    except TrainingSubprocessTimeout as e:
+        diagnostic = log_worker_failure("training_subprocess", e, tail=e.safe_tail, job_id=job.get("id"))
+        return {"error": "Training process timed out", "failure_stage": "training_subprocess", "diagnostic": diagnostic}
     except Exception as e:
-        log_worker_failure("training_subprocess", e, credential_boundary=True, job_id=job.get("id"))
-        return {"error": "Training process failed", "failure_stage": "training_subprocess"}
+        diagnostic = log_worker_failure("training_subprocess", e, credential_boundary=True, job_id=job.get("id"))
+        return {"error": "Training process failed", "failure_stage": "training_subprocess", "diagnostic": diagnostic}
 
     if returncode != 0:
-        log_worker_failure("training_subprocess", tail=output_tail, exit_code=returncode, job_id=job.get("id"))
+        diagnostic = log_worker_failure("training_subprocess", tail=output_tail, exit_code=returncode, job_id=job.get("id"))
         return {
-            "error": safe_training_failure_label(output_tail, returncode),
+            "error": safe_training_failure_label(output_tail[-2000:], returncode),
             "failure_stage": "training_subprocess",
             "exit_code": returncode,
+            "diagnostic": diagnostic,
         }
 
     output_path = f"./training/model/{out_id}.safetensors"
@@ -799,17 +824,20 @@ def handler(job):
                 os.remove(output_path)
             except OSError:
                 pass
+        diagnostic = log_worker_failure("training_subprocess", tail=output_tail, exit_code=0, job_id=job.get("id"))
         return {
             "error": (
                 "Training reported non-finite loss (NaN); checkpoint was discarded. "
                 "Try lower learning rates, different images or captions, or a different base model."
             ),
             "failure_stage": "training_subprocess",
+            "exit_code": 0,
+            "diagnostic": diagnostic,
         }
 
     if not os.path.exists(output_path):
-        log_worker_failure("training_output", job_id=job.get("id"))
-        return {"error": "Training completed without an output model", "failure_stage": "training_output"}
+        diagnostic = log_worker_failure("training_output", job_id=job.get("id"))
+        return {"error": "Training completed without an output model", "failure_stage": "training_output", "diagnostic": diagnostic}
 
     job_s3_config = job.get("s3Config")
 
@@ -821,8 +849,8 @@ def handler(job):
             bucket_name="lora",
         )
     except Exception as e:
-        log_worker_failure("model_upload", e, credential_boundary=True, job_id=job.get("id"))
-        return {"error": "Failed to upload model", "failure_stage": "model_upload"}
+        diagnostic = log_worker_failure("model_upload", e, credential_boundary=True, job_id=job.get("id"))
+        return {"error": "Failed to upload model", "failure_stage": "model_upload", "diagnostic": diagnostic}
 
     return {"lora": uploaded_lora_url}
 
