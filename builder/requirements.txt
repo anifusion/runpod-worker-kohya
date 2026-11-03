@@ -39,7 +39,7 @@ Jinja2==3.1.5
 jsonschema==4.23.0
 jsonschema-specifications==2024.10.1
 # Pinned sd-scripts fork (must match builder/setup.sh commit).
--e git+https://github.com/anifusion/sd-scripts.git@4f08bd287e15b6ffca63a06362e7a2c00ba68c67#egg=library
+-e git+https://github.com/anifusion/sd-scripts.git@59e616d1d1b5c52f2984d7004a96c2cff4b6ace3#egg=library
 lightning-utilities==0.12.0
 lion-pytorch==0.0.6
 Markdown==3.7
