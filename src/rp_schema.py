@@ -1,4 +1,5 @@
 INPUT_SCHEMA = {
+    "private_output": {"type": bool, "required": False, "default": False},
     'zip_url': {
         'type': str,
         'required': True

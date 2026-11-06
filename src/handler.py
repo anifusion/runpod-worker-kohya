@@ -10,6 +10,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from urllib.parse import urlparse
@@ -148,21 +149,6 @@ def safe_training_failure_label(tail: str, exit_code: int) -> str:
     if any(marker in lower for marker in ("file name too long", "errno 36", "nametoolong")):
         return "File name too long"
     return f"Training process failed: {exit_code}"
-
-
-def _usable_volume_checkpoint(path: str) -> bool:
-    try:
-        return os.path.getsize(path) >= _MIN_VOLUME_CHECKPOINT_BYTES
-    except OSError:
-        return False
-
-
-def _drop_unusable_volume_checkpoint(path: str, reason: str) -> None:
-    print(f"runpod-worker-kohya: ignoring volume cache: {reason}")
-    try:
-        os.remove(path)
-    except OSError:
-        pass
 
 
 def ensure_accelerate_config(mixed_precision: str) -> str:
@@ -355,7 +341,7 @@ def sniff_checkpoint_extension(local_path: str) -> str:
     """
     with open(local_path, "rb") as f:
         head = f.read(8)
-    if len(head) < 2:
+    if len(head) < 8:
         raise ValueError("file too small")
     if head[:2] == b"\x1f\x8b":
         raise ValueError("gzip prefix (need raw checkpoint bytes)")
@@ -379,6 +365,22 @@ def sniff_checkpoint_extension(local_path: str) -> str:
     raise ValueError("not a recognized safetensors, zip, or pickle checkpoint")
 
 
+def checkpoint_matches_path(path: str) -> bool:
+    """Reject incomplete caches and files whose contents disagree with the loader suffix."""
+    try:
+        if os.path.getsize(path) < _MIN_VOLUME_CHECKPOINT_BYTES:
+            return False
+        detected = sniff_checkpoint_extension(path)
+    except (OSError, ValueError):
+        return False
+    suffix = os.path.splitext(path)[1].lower()
+    if suffix in (".safetensors", ".sft"):
+        return detected == ".safetensors"
+    if suffix in (".ckpt", ".pt", ".pth", ".bin"):
+        return detected == ".ckpt"
+    return False
+
+
 def _volume_checkpoint_try_legacy_migrate(
     volume_dir: str, leaf: str, legacy_path: str
 ) -> str | None:
@@ -387,18 +389,18 @@ def _volume_checkpoint_try_legacy_migrate(
         return None
     try:
         ext = sniff_checkpoint_extension(legacy_path)
-    except ValueError as e:
+    except (OSError, ValueError) as e:
         log_worker_failure("legacy_cache", e, credential_boundary=True)
         return None
     fixed = os.path.join(volume_dir, leaf + ext)
-    if fixed != legacy_path and not os.path.isfile(fixed):
+    if fixed != legacy_path and not checkpoint_matches_path(fixed):
         try:
-            shutil.copy2(legacy_path, fixed)
+            cache_downloaded_checkpoint(legacy_path, fixed, volume_dir)
             print("runpod-worker-kohya: migrated legacy cache")
-        except OSError as src_err:
+        except (OSError, ValueError) as src_err:
             log_worker_failure("legacy_cache_migrate", src_err, credential_boundary=True)
-            return legacy_path
-    return fixed if os.path.isfile(fixed) else legacy_path
+            return None
+    return fixed if os.path.isfile(fixed) else None
 
 
 def resolve_volume_checkpoint_path(volume_dir: str, model_url: str) -> str | None:
@@ -408,25 +410,25 @@ def resolve_volume_checkpoint_path(volume_dir: str, model_url: str) -> str | Non
     if leaf_has_checkpoint_extension(leaf):
         p = os.path.join(volume_dir, leaf)
         if os.path.isfile(p):
-            if _usable_volume_checkpoint(p):
+            if checkpoint_matches_path(p):
                 return p
-            _drop_unusable_volume_checkpoint(p, "file too small")
+            print("runpod-worker-kohya: ignoring invalid volume checkpoint")
         return None
 
     for suffix in (".safetensors", ".ckpt"):
         p = os.path.join(volume_dir, leaf + suffix)
         if os.path.isfile(p):
-            if _usable_volume_checkpoint(p):
+            if checkpoint_matches_path(p):
                 return p
-            _drop_unusable_volume_checkpoint(p, "file too small")
+            print("runpod-worker-kohya: ignoring invalid volume checkpoint")
 
     legacy = _volume_checkpoint_try_legacy_migrate(
         volume_dir, leaf, os.path.join(volume_dir, leaf)
     )
-    if legacy and _usable_volume_checkpoint(legacy):
+    if legacy and checkpoint_matches_path(legacy):
         return legacy
     if legacy:
-        _drop_unusable_volume_checkpoint(legacy, "file too small")
+        print("runpod-worker-kohya: ignoring invalid legacy checkpoint")
     return None
 
 
@@ -435,10 +437,27 @@ def finalize_volume_checkpoint_dest(
 ) -> str:
     """Target path under volume_dir after a fresh download (sniffs when URL has no extension)."""
     leaf = checkpoint_leaf_from_url(model_url)
+    if os.path.getsize(downloaded_path) < _MIN_VOLUME_CHECKPOINT_BYTES:
+        raise ValueError("downloaded checkpoint is too small")
+    detected = sniff_checkpoint_extension(downloaded_path)
     if leaf_has_checkpoint_extension(leaf):
-        return os.path.join(volume_dir, leaf)
-    ext = sniff_checkpoint_extension(downloaded_path)
-    return os.path.join(volume_dir, leaf + ext)
+        dest = os.path.join(volume_dir, leaf)
+        suffix = os.path.splitext(leaf)[1].lower()
+        expected = ".safetensors" if suffix in (".safetensors", ".sft") else ".ckpt"
+        if detected != expected:
+            raise ValueError("checkpoint content does not match URL suffix")
+        return dest
+    return os.path.join(volume_dir, leaf + detected)
+
+
+def cache_downloaded_checkpoint(source_path: str, dest_path: str, volume_dir: str) -> None:
+    """Publish a validated copy atomically so concurrent jobs never read partial bytes."""
+    with tempfile.TemporaryDirectory(dir=volume_dir) as staging_dir:
+        staged = os.path.join(staging_dir, os.path.basename(dest_path))
+        shutil.copy2(source_path, staged)
+        if os.path.getsize(staged) != os.path.getsize(source_path) or not checkpoint_matches_path(staged):
+            raise ValueError("staged checkpoint is incomplete or invalid")
+        os.replace(staged, dest_path)
 
 
 def sanitize_string_param(param_value):
@@ -459,6 +478,7 @@ def upload_lora_to_bucket(
     file_location: str,
     bucket_creds=None,
     bucket_name: str = "lora",
+    require_remote: bool = False,
 ) -> str:
     """
     Upload a trained LoRA to object storage with bounded multipart concurrency so
@@ -481,6 +501,8 @@ def upload_lora_to_bucket(
         secret_access_key = os.environ.get("BUCKET_SECRET_ACCESS_KEY", None)
 
     if not (endpoint_url and access_key_id and secret_access_key):
+        if require_remote:
+            raise RuntimeError("private_model_credentials_unavailable")
         print("No bucket endpoint set, saving to local upload folder")
         os.makedirs("local_upload", exist_ok=True)
         local_upload_location = f"local_upload/{file_name}"
@@ -503,12 +525,13 @@ def upload_lora_to_bucket(
     )
 
     file_size = os.path.getsize(file_location)
-    with tqdm(total=file_size, unit="B", unit_scale=True, desc=file_name) as progress_bar:
+    with tqdm(total=file_size, unit="B", unit_scale=True, desc="model upload") as progress_bar:
         boto_client.upload_file(
             Filename=file_location,
             Bucket=bucket_name,
             Key=file_name,
             Config=transfer_config,
+            ExtraArgs={"CacheControl": "private, no-store"} if require_remote else {},
             Callback=progress_bar.update,
         )
 
@@ -517,6 +540,16 @@ def upload_lora_to_bucket(
         Params={"Bucket": bucket_name, "Key": file_name},
         ExpiresIn=604800,
     )
+
+
+def lora_output_destination(out_id, private_output):
+    """Versioned keys keep private retries separate from legacy public objects."""
+    if private_output:
+        bucket = os.environ.get("R2_PRIVATE_BUCKET")
+        if not bucket:
+            raise RuntimeError("private_model_storage_unavailable")
+        return bucket, f"private-v1/lora/{out_id}.safetensors"
+    return "lora", f"{out_id}.safetensors"
 
 
 def validate_numeric_param(param_value, min_val=None, max_val=None):
@@ -544,6 +577,19 @@ def handler(job):
         diagnostic = log_worker_failure("input_validation", job_id=job.get("id"))
         return {"error": "Invalid training input", "failure_stage": "input_validation", "diagnostic": diagnostic}
     job_input = job_input["validated_input"]
+
+    if job_input.get("private_output") is True:
+        try:
+            lora_output_destination("validation", True)
+            credentials = job.get("s3Config")
+            configured = all(credentials.get(key) for key in ("endpointUrl", "accessId", "accessSecret")) if credentials else all(
+                os.environ.get(key) for key in ("BUCKET_ENDPOINT_URL", "BUCKET_ACCESS_KEY_ID", "BUCKET_SECRET_ACCESS_KEY")
+            )
+            if not configured:
+                raise RuntimeError("private_model_credentials_unavailable")
+        except Exception:
+            diagnostic = log_worker_failure("input_validation", job_id=job.get("id"), code="PrivateStorageUnavailable")
+            return {"error": "Private model storage is unavailable", "failure_stage": "input_validation", "diagnostic": diagnostic}
 
     # Validate URLs
     if not validate_url(job_input["model_url"]):
@@ -616,34 +662,29 @@ def handler(job):
             diagnostic = log_worker_failure("model_download", e, credential_boundary=True, job_id=job.get("id"))
             return {"error": "Failed to download model", "failure_stage": "model_download", "diagnostic": diagnostic}
 
-        # Make sure we check if the volume directory exists, in that case just use the download file path
-        if os.path.exists(VOLUME_DIR):
-            try:
-                volume_model_path = finalize_volume_checkpoint_dest(
-                    VOLUME_DIR, model_url, downloaded_model["file_path"]
-                )
-            except ValueError as e:
-                diagnostic = log_worker_failure("model_checkpoint", e, credential_boundary=True, job_id=job.get("id"))
-                return {"error": "Downloaded file is not a usable base checkpoint", "failure_stage": "model_checkpoint", "diagnostic": diagnostic}
+        try:
+            volume_model_path = finalize_volume_checkpoint_dest(
+                VOLUME_DIR, model_url, downloaded_model["file_path"]
+            )
+        except (OSError, ValueError) as e:
+            diagnostic = log_worker_failure("model_checkpoint", e, credential_boundary=True, job_id=job.get("id"))
+            return {"error": "Downloaded file is not a usable base checkpoint", "failure_stage": "model_checkpoint", "diagnostic": diagnostic}
+        if os.path.isdir(VOLUME_DIR):
             print("Moving model to volume for caching")
             try:
-                shutil.copy(downloaded_model["file_path"], volume_model_path)
-                original_file_path = downloaded_model["file_path"]
-
-                # Update the file path to the volume directory
-                downloaded_model["file_path"] = volume_model_path
-
-                # Delete old file
-                os.remove(original_file_path)
+                cache_downloaded_checkpoint(downloaded_model["file_path"], volume_model_path, VOLUME_DIR)
             except Exception as e:
-                # Volume may be full; drop any partial cache and train from the download.
-                if os.path.isfile(volume_model_path):
-                    try:
-                        os.remove(volume_model_path)
-                    except OSError:
-                        pass
+                # A full or unavailable volume must not prevent training from the download.
                 log_worker_failure("volume_cache", e, credential_boundary=True, job_id=job.get("id"))
                 print("runpod-worker-kohya: training with downloaded model")
+            else:
+                original_file_path = downloaded_model["file_path"]
+                downloaded_model["file_path"] = volume_model_path
+                if original_file_path != volume_model_path:
+                    try:
+                        os.remove(original_file_path)
+                    except OSError:
+                        pass
 
     # Download the zip file
     print("runpod-worker-kohya: downloading training archive")
@@ -842,11 +883,14 @@ def handler(job):
     job_s3_config = job.get("s3Config")
 
     try:
+        private_output = job_input.get("private_output") is True
+        output_bucket, output_key = lora_output_destination(out_id, private_output)
         uploaded_lora_url = upload_lora_to_bucket(
-            file_name=f"{out_id}.safetensors",
+            file_name=output_key,
             file_location=output_path,
             bucket_creds=job_s3_config,
-            bucket_name="lora",
+            bucket_name=output_bucket,
+            require_remote=private_output,
         )
     except Exception as e:
         diagnostic = log_worker_failure("model_upload", e, credential_boundary=True, job_id=job.get("id"))
