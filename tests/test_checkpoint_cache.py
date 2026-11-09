@@ -1,3 +1,4 @@
+import _requires_python  # noqa: F401  (must run first)
 import ast
 import json
 import os
