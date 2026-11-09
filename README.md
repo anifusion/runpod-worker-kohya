@@ -11,21 +11,10 @@ Derived from e1pupper's Runpod worker implementation https://github.com/e1pupper
 1) Clone this repo
 2) Cache the base model
 
-## Deployment
+## Documentation
 
-Runpod can build from a connected GitHub repository automatically after a push.
-
-For a local build, use `docker build --platform linux/amd64 -t runpod-worker-kohya:local .`. The pinned Triton version does not provide a compatible arm64 wheel.
-
-**Manual action after each push:** Open the endpoint's build history in Runpod. Confirm that the build for the pushed commit is marked `Completed` and the endpoint uses that image before running jobs.
-
-## Checkpoint cache recovery
-
-The worker checks a cached checkpoint's size, header, and filename suffix before reuse. An invalid cache is ignored until a validated legacy copy or download replaces its path. Legacy extensionless caches are copied to a filename matching their detected format. Failed migration falls back to the normal download path without selecting the extensionless file.
-
-Downloads are checked before training, even without a network volume. When a volume is available, the worker stages and validates a copy there before publishing it atomically. A cache write failure leaves the existing cache intact and trains from the validated download. Header checks catch obvious wrong-format and some partial files, but they do not verify a full checkpoint against an expected hash.
-
-Run synthetic worker regression checks with Python 3.10 or later: `python3 -B -m unittest discover -s tests`. These tests do not download models or run GPU training.
+- [Deployment and checkpoint cache](docs/deployment.md)
+- [Private model outputs](docs/private-outputs.md)
 
 ## Inputs
 
@@ -90,14 +79,3 @@ accelerate launch --num_cpu_threads_per_process 1 train_network.py \
 --bucket_reso_steps=64 \
 --bucket_no_upscale
 ```
-
-## Private model outputs
-
-`private_output` is an optional boolean input, defaulting to false for legacy jobs.
-When true, the worker requires `R2_PRIVATE_BUCKET` and the existing bucket credentials,
-writes `private-v1/lora/<out_id>.safetensors` without a public ACL, and returns a temporary
-signed URL. Missing private configuration fails the job without a public or local fallback.
-The bucket must have no public domain or anonymous read policy. Configure it before
-submitting private jobs, and verify the completed build and a synthetic training result.
-Keep workers supporting this input available while private jobs are queued or retryable.
-Legacy jobs retain their original bucket and key. See `.env.example` for placeholder configuration.
