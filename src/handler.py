@@ -54,7 +54,8 @@ def log_worker_failure(stage, error=None, *, tail=None, credential_boundary=Fals
             diagnostic["job_id"] = job_id
         if isinstance(exit_code, int):
             diagnostic["exit_code"] = exit_code
-        if code in {"InvalidModelUrl", "InvalidZipUrl", "InvalidNumericParameter"}:
+        if code in {"InvalidModelUrl", "InvalidZipUrl", "InvalidNumericParameter",
+                    "PrivateStorageUnavailable", "InvalidOutputId"}:
             diagnostic["code"] = code
         if isinstance(parameter, str) and re.fullmatch(r"[a-z_]{1,40}", parameter):
             diagnostic["parameter"] = parameter
@@ -590,6 +591,11 @@ def handler(job):
         except Exception:
             diagnostic = log_worker_failure("input_validation", job_id=job.get("id"), code="PrivateStorageUnavailable")
             return {"error": "Private model storage is unavailable", "failure_stage": "input_validation", "diagnostic": diagnostic}
+        # The id becomes an object key and a local file name, so reject separators and dot segments.
+        private_out_id = job_input.get("out_id") or job.get("id")
+        if not isinstance(private_out_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", private_out_id):
+            diagnostic = log_worker_failure("input_validation", job_id=job.get("id"), code="InvalidOutputId")
+            return {"error": "Invalid output id", "failure_stage": "input_validation", "diagnostic": diagnostic}
 
     # Validate URLs
     if not validate_url(job_input["model_url"]):

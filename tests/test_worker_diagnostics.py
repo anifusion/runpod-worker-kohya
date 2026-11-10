@@ -97,6 +97,43 @@ class WorkerDiagnosticsTests(unittest.TestCase):
         self.assertEqual(invalid_number["diagnostic"]["code"], "InvalidNumericParameter")
         self.assertEqual(invalid_number["diagnostic"]["parameter"], "train_batch_size")
 
+    def test_private_jobs_fail_closed_before_any_download(self):
+        namespace, output = load_functions(
+            validate=lambda value, schema: {"validated_input": value},
+            INPUT_SCHEMA={},
+            lora_output_destination=lambda out_id, private: (_ for _ in ()).throw(
+                RuntimeError("private_model_storage_unavailable")),
+        )
+        job = {"id": "job_123", "input": {"private_output": True, "out_id": "abc", "model_url": "x", "zip_url": "y"}}
+        result = namespace["handler"](job)
+        self.assertEqual(result["error"], "Private model storage is unavailable")
+        self.assertEqual(result["diagnostic"]["code"], "PrivateStorageUnavailable")
+        self.assertEqual(len(output), 2)
+
+    def test_private_jobs_require_credentials_and_a_safe_output_id(self):
+        keys = ("BUCKET_ENDPOINT_URL", "BUCKET_ACCESS_KEY_ID", "BUCKET_SECRET_ACCESS_KEY")
+        env = types.SimpleNamespace(environ={})
+        namespace, _ = load_functions(
+            os=env,
+            validate=lambda value, schema: {"validated_input": value},
+            INPUT_SCHEMA={},
+            lora_output_destination=lambda out_id, private: ("private-fixture", "key"),
+            validate_url=lambda value: False,
+        )
+        base = {"private_output": True, "out_id": "abc-123", "model_url": "x", "zip_url": "y"}
+        missing = namespace["handler"]({"id": "job_1", "input": dict(base)})
+        self.assertEqual(missing["diagnostic"]["code"], "PrivateStorageUnavailable")
+        env.environ.update({key: "fixture" for key in keys})
+        ok = namespace["handler"]({"id": "job_1", "input": dict(base)})
+        self.assertEqual(ok["diagnostic"]["code"], "InvalidModelUrl")
+        for bad in ("../escape", "a/b", "..", "a b"):
+            result = namespace["handler"]({"id": "job_1", "input": {**base, "out_id": bad}})
+            self.assertEqual(result["diagnostic"]["code"], "InvalidOutputId")
+        fallback = namespace["handler"]({"id": "job_1", "input": {**base, "out_id": ""}})
+        self.assertEqual(fallback["diagnostic"]["code"], "InvalidModelUrl")
+        legacy = namespace["handler"]({"id": "job_1", "input": {**base, "private_output": False, "out_id": "../x"}})
+        self.assertEqual(legacy["diagnostic"]["code"], "InvalidModelUrl")
+
     def test_safe_event_omits_private_exception_and_bad_identifier(self):
         namespace, output = load_functions()
         namespace["log_worker_failure"](
