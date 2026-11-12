@@ -1,5 +1,6 @@
-# Base image
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+# Base image. Keep its CUDA version aligned with the PyPI torch, xformers and bitsandbytes wheels
+# in builder/requirements.txt (torch 2.3.1 bundles CUDA 12.1 libraries).
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
 # Use bash shell with pipefail option
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
