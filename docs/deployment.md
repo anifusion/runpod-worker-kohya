@@ -64,7 +64,15 @@ Selected installed packages: torch 2.15.0, torchvision 0.29.2, Pillow 13.0.0, xf
 
 The first attempt stopped at apt upgrade because Docker lacked archive space. After authorized removal of 24 untagged images, the unchanged candidate built successfully. A remaining approved image was retained because Docker refused removal without force. No containers, volumes or tagged images were removed. That storage blocker is resolved for this build.
 
-GPU kernels, full SDXL training, output-quality/performance comparison, final-image vulnerability scanning and production adoption remain open. The image has not been pushed or deployed.
+The subsequent compatible dependency patch and incremental scan are described next. GPU kernels, full SDXL training, output-quality/performance comparison, a clean release build of the final manifest and production adoption remain open. The image has not been pushed or deployed.
+
+### Compatible support-library patch
+
+The worker pins FastAPI 0.136.3, Starlette 1.3.1, fsspec 2026.6.0, protobuf 5.29.6, Rich 13.7.1 and setuptools 84.2.1. Unused pytorch-lightning, torchmetrics and lightning-utilities are removed. Training-framework versions and both fork pins remain unchanged. Framework advisory remediation requires a separately reviewed coordinated migration.
+
+The build runs `python3 /checks/worker_compatibility.py` after copying the handler. This checks offline tokenizer IDs, the real SDK's synthetic request/validation path and handler registration/input refusal without provider connections. Runtime checks also cover SDXL checkpoint conversion, conditioning gradients and the training learning-rate scheduler.
+
+November 12, 2026: the compatible manifest resolved independently for Linux amd64/Python 3.11. An incremental image built on the previously verified CUDA/Linux layers passed all 85 direct requirement checks, both fork pins, dependency consistency, 27 worker tests, seven CPU runtime checks and three installed-library checks. A merged-filesystem vulnerability scan completed. Remaining training-framework findings require coordinated follow-up. The incremental build avoids duplicate large layers but does not verify a clean build of the final Dockerfile. Complete that build on an isolated host before release. No local Docker expansion is required if another approved build host is used. Native GPU and full training acceptance remain required.
 
 ### One-time adoption
 
@@ -79,7 +87,7 @@ Applies when moving from Python 3.10/CUDA 12.1/torch 2.3.1 to this candidate. A 
    ```
 
    This requires CUDA, checks the torch CUDA version and GPU compute capability, and executes xformers attention/backpropagation plus a two-step AdamW8bit update. It must not be reported as passing when GPU tests are skipped.
-3. Before production adoption, verify endpoint capacity for CUDA 13.2 or newer and the intended GPU families. The candidate's native checks require compute capability 7.5 or later. Change the endpoint's minimum CUDA selection from 12.1 to 13.2 before the candidate serves jobs. Do not change production settings during local verification. Confirm intended GPU availability instead of assuming all previous hosts remain eligible.
+3. Before production adoption, verify endpoint capacity for CUDA 13.2 or newer and the intended GPU families. The candidate's native checks require compute capability 7.5 or later. Change the endpoint's minimum CUDA selection from 12.1 to 13.2, and complete the isolated GPU check in step 2, before pushing the candidate to the endpoint's connected branch. That push starts the automatic build and can roll it out to serving workers, so the push itself is the deployment. Do not change production settings during local verification. Confirm intended GPU availability instead of assuming all previous hosts remain eligible.
 4. Run an approved bounded private training acceptance job on the candidate. Compare finite loss, output usability, peak memory, runtime, callbacks and refunds with an approved baseline. Check both supported precision paths on appropriate GPUs, cache behavior, dataset loading and private output. The synthetic component suite does not substitute for this check.
 5. After acceptance and an authorized release, confirm the intended image is active across every claiming worker. Preserve the format/cache and private-output safeguards during recovery. Do not routinely roll back to the pickle-accepting image. Keep legacy caches until separately approved cleanup. Record unresolved advisories separately.
 
