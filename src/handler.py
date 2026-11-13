@@ -21,6 +21,7 @@ import runpod
 from boto3 import session as boto_session
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
 from runpod.serverless.utils.rp_upload import extract_region_from_url
 from runpod.serverless.utils.rp_validator import validate
 from runpod.serverless.utils import rp_download
@@ -460,6 +461,54 @@ def sanitize_string_param(param_value):
     return param_value
 
 
+def storage_credentials(bucket_creds=None):
+    """Return (endpoint_url, access_key_id, secret_access_key) from the job or environment."""
+    if bucket_creds:
+        return bucket_creds.get("endpointUrl"), bucket_creds.get("accessId"), bucket_creds.get("accessSecret")
+    return (
+        os.environ.get("BUCKET_ENDPOINT_URL"),
+        os.environ.get("BUCKET_ACCESS_KEY_ID"),
+        os.environ.get("BUCKET_SECRET_ACCESS_KEY"),
+    )
+
+
+def split_storage_endpoint(endpoint_url):
+    """Split an S3 endpoint into its account URL and an optional bucket path.
+
+    Deployments may configure the endpoint as `https://<account-host>/<bucket>`.
+    Passing that URL to the S3 client turns every requested bucket into a folder
+    inside `<bucket>`, so a private upload to another bucket silently lands in the
+    configured one. Uploads therefore use the account URL and name buckets
+    explicitly. Returns (account_url, bucket or None).
+    """
+    parsed = urlparse(endpoint_url or "")
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("model storage endpoint must be an http(s) URL")
+    if parsed.query or parsed.fragment:
+        raise ValueError("model storage endpoint must not contain a query or fragment")
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if len(segments) > 1:
+        raise ValueError("model storage endpoint path may name at most one bucket")
+    return f"{parsed.scheme}://{parsed.netloc}", (segments[0] if segments else None)
+
+
+def lora_output_destination(out_id, private_output, endpoint_bucket=None):
+    """Return the (bucket, key) the app reads for this training's LoRA.
+
+    Private weights go to R2_PRIVATE_BUCKET under versioned `private-v1/lora/` keys.
+    Public weights go to `lora/<id>.safetensors` in the bucket named by the storage
+    endpoint path, or to the legacy `lora` bucket when the endpoint names none.
+    """
+    if private_output:
+        bucket = os.environ.get("R2_PRIVATE_BUCKET")
+        if not bucket:
+            raise RuntimeError("private_model_storage_unavailable")
+        return bucket, f"private-v1/lora/{out_id}.safetensors"
+    if endpoint_bucket:
+        return endpoint_bucket, f"lora/{out_id}.safetensors"
+    return "lora", f"{out_id}.safetensors"
+
+
 def upload_lora_to_bucket(
     file_name: str,
     file_location: str,
@@ -470,6 +519,10 @@ def upload_lora_to_bucket(
     """
     Upload a trained LoRA to object storage with bounded multipart concurrency so
     urllib3 does not warn about connection pool exhaustion on high-core hosts.
+
+    `bucket_name` and `file_name` must be the exact bucket and key the app reads
+    (see lora_output_destination). The upload is verified by size before the job
+    reports success, so a misrouted or partial upload fails the job instead.
     """
     transfer_config = TransferConfig(
         multipart_threshold=1024 * 25,
@@ -478,35 +531,36 @@ def upload_lora_to_bucket(
         use_threads=True,
     )
 
-    if bucket_creds:
-        endpoint_url = bucket_creds["endpointUrl"]
-        access_key_id = bucket_creds["accessId"]
-        secret_access_key = bucket_creds["accessSecret"]
-    else:
-        endpoint_url = os.environ.get("BUCKET_ENDPOINT_URL", None)
-        access_key_id = os.environ.get("BUCKET_ACCESS_KEY_ID", None)
-        secret_access_key = os.environ.get("BUCKET_SECRET_ACCESS_KEY", None)
+    endpoint_url, access_key_id, secret_access_key = storage_credentials(bucket_creds)
 
     if not (endpoint_url and access_key_id and secret_access_key):
         if require_remote:
             raise RuntimeError("private_model_credentials_unavailable")
+        # A local copy is never readable by the app, so it is only for local
+        # development, never for a deployed worker.
+        if os.environ.get("ALLOW_LOCAL_LORA_UPLOAD") != "1":
+            raise RuntimeError("model_storage_credentials_unavailable")
         print("No bucket endpoint set, saving to local upload folder")
         os.makedirs("local_upload", exist_ok=True)
         local_upload_location = f"local_upload/{file_name}"
         shutil.copyfile(file_location, local_upload_location)
         return local_upload_location
 
-    region = extract_region_from_url(endpoint_url)
+    account_url, _ = split_storage_endpoint(endpoint_url)
+    region = extract_region_from_url(account_url)
     bucket_session = boto_session.Session()
     boto_client = bucket_session.client(
         "s3",
-        endpoint_url=endpoint_url,
+        endpoint_url=account_url,
         aws_access_key_id=access_key_id,
         aws_secret_access_key=secret_access_key,
         config=BotoConfig(
             signature_version="s3v4",
             retries={"max_attempts": 3, "mode": "standard"},
             max_pool_connections=LORA_UPLOAD_MAX_POOL_CONNECTIONS,
+            # Name buckets in the path explicitly so the destination never
+            # depends on the client library's default addressing style.
+            s3={"addressing_style": "path"},
         ),
         region_name=region,
     )
@@ -522,21 +576,24 @@ def upload_lora_to_bucket(
             Callback=progress_bar.update,
         )
 
+    try:
+        stored = boto_client.head_object(Bucket=bucket_name, Key=file_name)
+    except ClientError as error:
+        code = str(error.response.get("Error", {}).get("Code", ""))
+        if code not in ("403", "AccessDenied", "Forbidden"):
+            raise RuntimeError("uploaded_model_verification_failed") from None
+        # Write-only credentials cannot confirm the object. The upload call
+        # already succeeded, so keep the result rather than fail every job.
+        print("runpod-worker-kohya: upload verification unavailable (read access denied)")
+    else:
+        if stored.get("ContentLength") != file_size:
+            raise RuntimeError("uploaded_model_verification_failed")
+
     return boto_client.generate_presigned_url(
         "get_object",
         Params={"Bucket": bucket_name, "Key": file_name},
         ExpiresIn=604800,
     )
-
-
-def lora_output_destination(out_id, private_output):
-    """Versioned keys keep private retries separate from legacy public objects."""
-    if private_output:
-        bucket = os.environ.get("R2_PRIVATE_BUCKET")
-        if not bucket:
-            raise RuntimeError("private_model_storage_unavailable")
-        return bucket, f"private-v1/lora/{out_id}.safetensors"
-    return "lora", f"{out_id}.safetensors"
 
 
 def validate_numeric_param(param_value, min_val=None, max_val=None):
@@ -935,7 +992,9 @@ def _handle_job(job, local_job_files):
 
     try:
         private_output = job_input.get("private_output") is True
-        output_bucket, output_key = lora_output_destination(out_id, private_output)
+        endpoint_url, _, _ = storage_credentials(job_s3_config)
+        _, endpoint_bucket = split_storage_endpoint(endpoint_url) if endpoint_url else (None, None)
+        output_bucket, output_key = lora_output_destination(out_id, private_output, endpoint_bucket)
         uploaded_lora_url = upload_lora_to_bucket(
             file_name=output_key,
             file_location=output_path,

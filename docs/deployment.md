@@ -8,6 +8,22 @@ For a local build, use `docker build --platform linux/amd64 -t runpod-worker-koh
 
 **Manual action after each push:** Open the endpoint's build history in Runpod. Confirm that the build for the pushed commit is marked `Completed` and the endpoint uses that image before running jobs.
 
+## Model output storage
+
+The worker uploads each trained LoRA to the exact bucket and key the app reads, then confirms the stored object's size before reporting success. A missing or wrong-size object fails the job. If the credentials cannot read the object, the worker logs that verification was unavailable and keeps the result.
+
+The storage endpoint (`endpointUrl` in the job's bucket settings, or `BUCKET_ENDPOINT_URL`) is the account URL, optionally followed by one path segment naming the public bucket. The worker always connects to the account URL with path-style addressing and names the bucket explicitly:
+
+| Output | Bucket | Key |
+| --- | --- | --- |
+| Public, endpoint names a bucket | That bucket | `lora/<id>.safetensors` |
+| Public, endpoint names no bucket | `lora` | `<id>.safetensors` |
+| Private (`private_output`) | `R2_PRIVATE_BUCKET` | `private-v1/lora/<id>.safetensors` |
+
+Earlier versions passed the full endpoint URL, bucket path included, to the S3 client. Public uploads still landed in the right place, but every private upload was written into the endpoint's public bucket under `<private-bucket>/private-v1/lora/`, where the app never reads it. Public destinations are unchanged.
+
+Without storage credentials the job fails, so the caller sees a failure instead of a model path nothing can read. `ALLOW_LOCAL_LORA_UPLOAD=1` restores the local copy for local development only.
+
 ## Checkpoint format and cache
 
 Base checkpoints must use safetensors. Pickle/ZIP checkpoints and model URLs with `.ckpt`, `.pt`, `.pth`, or `.bin` suffixes are rejected before dataset preparation or training. Header inspection never invokes a pickle loader. Full tensor validation remains the safetensors reader's responsibility. A recognized header is not a trusted publisher signature or a full-file integrity check.
