@@ -74,25 +74,27 @@ The worker pins FastAPI 0.136.3, Starlette 1.3.1, fsspec 2026.6.0, protobuf 5.29
 
 The build runs `python3 /checks/worker_compatibility.py` after copying the handler. This checks offline tokenizer IDs, the real SDK's synthetic request/validation path and handler registration/input refusal without provider connections. Runtime checks also cover SDXL checkpoint conversion, conditioning gradients and the training learning-rate scheduler.
 
-November 12, 2026: the compatible manifest resolved independently for Linux amd64/Python 3.11. An incremental image built on the previously verified CUDA/Linux layers passed all 85 direct requirement checks, both fork pins, dependency consistency, 27 worker tests, seven CPU runtime checks and three installed-library checks. A merged-filesystem vulnerability scan completed. Remaining training-framework findings require coordinated follow-up. The incremental build avoids duplicate large layers but does not verify a clean build of the final Dockerfile. Complete that build on an isolated host before release. No local Docker expansion is required if another approved build host is used. Native GPU and full training acceptance remain required.
+November 12, 2026: the compatible manifest resolved independently for Linux amd64/Python 3.11. An incremental image built on the previously verified CUDA/Linux layers passed all 85 direct requirement checks, both fork pins, dependency consistency, 27 worker tests, seven CPU runtime checks and three installed-library checks. A merged-filesystem vulnerability scan completed. Remaining training-framework findings require coordinated follow-up. The incremental build avoids duplicate large layers but does not verify a clean build of the final Dockerfile. The endpoint's own build of the release commit is that clean build, and its build-time checks run there. Native GPU and full training acceptance happen through the post-release verification job in the one-time adoption steps.
 
 ### One-time adoption
 
-Applies when moving from Python 3.10/CUDA 12.1/torch 2.3.1 to this candidate. A production-connected push can automatically adopt the new image, so complete isolated acceptance before that release. An approved isolated NVIDIA GPU host is a prerequisite. If none is available, the upgrade is not ready for production.
+Applies when moving from Python 3.10/CUDA 12.1/torch 2.3.1 to this candidate. The endpoint builds its image from the connected branch, so a push is the deployment. Adoption uses that normal build and verifies the running image with one real training job immediately after rollout, instead of a separate pre-release GPU environment.
 
-1. Build the candidate image for linux/amd64 through an authorized build process. Confirm `pip check`, CPU compatibility checks and tokenizer caching succeed. Record the image digest and installed package versions, and scan the image's Python and native libraries.
-2. On the approved isolated GPU host, run the following against the built image without production secrets or volumes:
+1. Before pushing, raise the endpoint's minimum CUDA version from 12.1 to 13.2 and newer in its advanced settings. Images built for CUDA 12.1 also run on those hosts, so the current image keeps serving jobs. Without this change, workers placed on hosts with older drivers cannot start the new image and jobs wait in the queue. Afterwards, confirm the endpoint still finds workers for its GPU types. The candidate needs GPU compute capability 7.5 or later.
+2. Push the adoption commits to the connected branch at a low-traffic time. Confirm the endpoint build completes. The build runs `pip check`, the CPU compatibility checks, tokenizer caching and the installed-library worker checks, so a failure there stops the release before any worker uses the new image.
+3. As soon as the new build is active, run one small private training job from an owner or test account. In the job logs, confirm training ran on the GPU with finite loss, the job completed and the LoRA uploaded. Compare the LoRA's quality and the run time with an earlier training on the same base model. Check the other precision setting on a later job.
+4. If that job fails or its output is clearly worse, roll back. Redeploy the previous release from the endpoint if the console offers it. Otherwise revert the adoption commits and push, so the endpoint rebuilds the previous runtime. Jobs that fail before the rollback completes return the worker's normal failure result.
+5. After the verification job passes, confirm every worker runs the new image. Preserve the format/cache and private-output safeguards. Keep legacy caches until a separately approved cleanup. Record unresolved advisories separately.
 
-   ```bash
-   docker run --rm --gpus all runpod-worker-kohya:local \
-     python3 /checks/runtime_compatibility.py --sd-scripts-root /sd-scripts --require-cuda
-   ```
+For diagnosis, for example after a failed verification job, the image also contains a native GPU check that can run on any machine with a CUDA 13.2-capable NVIDIA driver:
 
-   This requires CUDA, checks the torch CUDA version and GPU compute capability, and executes xformers attention/backpropagation plus a two-step AdamW8bit update. It must not be reported as passing when GPU tests are skipped.
-3. Before production adoption, verify endpoint capacity for CUDA 13.2 or newer and the intended GPU families. The candidate's native checks require compute capability 7.5 or later. Change the endpoint's minimum CUDA selection from 12.1 to 13.2, and complete the isolated GPU check in step 2, before pushing the candidate to the endpoint's connected branch. That push starts the automatic build and can roll it out to serving workers, so the push itself is the deployment. Do not change production settings during local verification. Confirm intended GPU availability instead of assuming all previous hosts remain eligible.
-4. Run an approved bounded private training acceptance job on the candidate. Compare finite loss, output usability, peak memory, runtime, callbacks and refunds with an approved baseline. Check both supported precision paths on appropriate GPUs, cache behavior, dataset loading and private output. The synthetic component suite does not substitute for this check.
-5. After acceptance and an authorized release, confirm the intended image is active across every claiming worker. Preserve the format/cache and private-output safeguards during recovery. Do not routinely roll back to the pickle-accepting image. Keep legacy caches until separately approved cleanup. Record unresolved advisories separately.
+```bash
+docker run --rm --gpus all <image> \
+  python3 /checks/runtime_compatibility.py --sd-scripts-root /sd-scripts --require-cuda
+```
 
-No app payload migration or secret change is required. For provider commands needing existing credentials, load env vars through the approved process (see `.env.example`). This transition ends after image, GPU, training and all-worker checks pass. Later deployments retaining the same runtime contract require no repeat CUDA-setting change.
+It checks the torch CUDA version and compute capability, and runs xformers attention/backpropagation plus a two-step AdamW8bit update. A run that reports the GPU test as skipped did not test the GPU.
+
+No app payload migration or secret change is required. For provider commands needing existing credentials, load env vars through the approved process (see `.env.example`). This transition ends after the verification job passes and every worker runs the new image. Later deployments retaining the same runtime contract require no repeat CUDA-setting change.
 
 Sources: [PyTorch package metadata](https://pypi.org/pypi/torch/2.15.0/json), [xformers stable ABI](https://github.com/facebookresearch/xformers/releases/tag/v0.0.34), [bitsandbytes installation](https://huggingface.co/docs/bitsandbytes/v0.50.2/en/installation), [Pillow 13 changes](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html).
