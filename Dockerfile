@@ -39,6 +39,8 @@ ENV HF_HOME=/runpod-volume/hf-cache
 # Add src files (Worker Template)
 ADD src /sd-scripts
 
+RUN PYTHONDONTWRITEBYTECODE=1 python3 /checks/worker_compatibility.py
+
 WORKDIR /sd-scripts
 
 CMD ["/sd-scripts/start.sh"]

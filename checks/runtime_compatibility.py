@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 parser = argparse.ArgumentParser()
@@ -20,10 +21,12 @@ import torch
 from accelerate import Accelerator
 from diffusers import AutoencoderKL, DDPMScheduler
 from safetensors.torch import save_file, load_file
-from transformers import CLIPTextConfig, CLIPTextModel
+from transformers import CLIPTextConfig, CLIPTextModelWithProjection
 import sdxl_train_network
-from library import train_util, utils, sdxl_original_unet
+from library import train_util, utils, sdxl_model_util, sdxl_original_unet
 from networks.lora import LoRAModule
+
+CLIPTextModel = sdxl_model_util.CLIPTextModel
 
 
 class RuntimeCompatibility(unittest.TestCase):
@@ -82,7 +85,7 @@ class RuntimeCompatibility(unittest.TestCase):
     def test_clip_and_vae_forward_backward(self):
         clip = CLIPTextModel(CLIPTextConfig(vocab_size=32, hidden_size=32,
             intermediate_size=64, num_hidden_layers=1, num_attention_heads=4,
-            max_position_embeddings=8))
+            max_position_embeddings=8, bos_token_id=1, eos_token_id=2, pad_token_id=0))
         clip(torch.tensor([[1, 2, 3, 4]])).last_hidden_state.square().mean().backward()
         vae = AutoencoderKL(block_out_channels=(32,), down_block_types=('DownEncoderBlock2D',),
             up_block_types=('UpDecoderBlock2D',), latent_channels=4, norm_num_groups=32)
@@ -114,6 +117,50 @@ class RuntimeCompatibility(unittest.TestCase):
             restored = load_file(path)
             for key, value in tensors.items():
                 self.assertTrue(torch.equal(value, restored[key]))
+
+    def test_sdxl_text_checkpoint_conversion_and_conditioning(self):
+        config = CLIPTextConfig(vocab_size=32, hidden_size=32, intermediate_size=64,
+            num_hidden_layers=12, num_attention_heads=4, max_position_embeddings=8,
+            projection_dim=32, eos_token_id=2, bos_token_id=1, pad_token_id=0)
+        encoder1 = CLIPTextModel(config)
+        encoder2 = CLIPTextModelWithProjection(config)
+        checkpoint = sdxl_model_util.convert_text_encoder_2_state_dict_to_sdxl(
+            encoder2.state_dict(), None)
+        checkpoint = {'conditioner.embedders.1.model.' + k: v for k, v in checkpoint.items()}
+        restored, _ = sdxl_model_util.convert_sdxl_text_encoder_2_checkpoint(checkpoint, 8)
+        copy = CLIPTextModelWithProjection(config)
+        sdxl_model_util._load_state_dict_on_device(copy, restored, 'cpu')
+        for key, value in encoder2.state_dict().items():
+            torch.testing.assert_close(copy.state_dict()[key], value, rtol=0, atol=0)
+        tokens = torch.tensor([[[1, 5, 7, 2, 0, 0, 0, 0]]])
+        tokenizer = SimpleNamespace(model_max_length=8, eos_token_id=2)
+        hidden1, hidden2, pooled = train_util.get_hidden_states_sdxl(
+            None, tokens, tokens, tokenizer, tokenizer, encoder1, copy)
+        self.assertEqual(tuple(hidden1.shape), (1, 8, 32))
+        self.assertEqual(tuple(hidden2.shape), (1, 8, 32))
+        self.assertEqual(tuple(pooled.shape), (1, 32))
+        sum(value.square().mean() for value in (hidden1, hidden2, pooled)).backward()
+        for encoder in (encoder1, copy):
+            gradient = encoder.text_model.embeddings.token_embedding.weight.grad
+            self.assertIsNotNone(gradient)
+            self.assertTrue(torch.isfinite(gradient).all())
+
+    def test_training_cosine_scheduler(self):
+        args = sdxl_train_network.setup_parser().parse_args([
+            '--optimizer_type', 'AdamW', '--learning_rate', '0.001',
+            '--lr_scheduler', 'cosine', '--lr_warmup_steps', '2', '--max_train_steps', '8'])
+        parameter = torch.nn.Parameter(torch.ones(1))
+        _, _, optimizer = train_util.get_optimizer(args, [parameter])
+        scheduler = train_util.get_scheduler_fix(args, optimizer, 1)
+        rates = [scheduler.get_last_lr()[0]]
+        for _ in range(8):
+            optimizer.step()
+            scheduler.step()
+            rates.append(scheduler.get_last_lr()[0])
+        self.assertEqual(rates[0], 0)
+        self.assertAlmostEqual(rates[2], 0.001)
+        self.assertAlmostEqual(rates[-1], 0)
+        self.assertTrue(all(a >= b for a, b in zip(rates[2:], rates[3:])))
 
     @unittest.skipUnless(options.require_cuda, 'GPU checks require --require-cuda')
     def test_gpu_native_kernels_and_optimizer(self):
