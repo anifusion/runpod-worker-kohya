@@ -16,7 +16,6 @@ import time
 import traceback
 from urllib.parse import urlparse
 
-import requests
 import runpod
 from boto3 import session as boto_session
 from boto3.s3.transfer import TransferConfig
@@ -24,10 +23,10 @@ from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 from runpod.serverless.utils.rp_upload import extract_region_from_url
 from runpod.serverless.utils.rp_validator import validate
-from runpod.serverless.utils import rp_download
 from tqdm_loggable.auto import tqdm
 
 from rp_schema import INPUT_SCHEMA
+from safe_download import MODEL_MAX_BYTES, download_file, download_dataset
 
 LORA_UPLOAD_MAX_CONCURRENCY = 4
 LORA_UPLOAD_MAX_POOL_CONNECTIONS = 16
@@ -391,21 +390,8 @@ def resolve_volume_checkpoint_path(volume_dir: str, model_url: str) -> str | Non
 
 
 def download_checkpoint(model_url: str) -> dict:
-    """Stream raw model bytes without SDK archive extraction or server-supplied filenames."""
-    os.makedirs("job_files", exist_ok=True)
-    fd, path = tempfile.mkstemp(dir="job_files", suffix=".download")
-    try:
-        with os.fdopen(fd, "wb") as output, requests.Session() as session:
-            # Do not attach ambient netrc credentials to model hosts or redirects.
-            session.trust_env = False
-            with session.get(model_url, stream=True, timeout=(10, 60)) as response:
-                response.raise_for_status()
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    output.write(chunk)
-        return {"file_path": os.path.abspath(path)}
-    except Exception:
-        os.unlink(path)
-        raise
+    """Download bounded raw model bytes through the public-network policy."""
+    return download_file(model_url, max_bytes=MODEL_MAX_BYTES)
 
 
 def normalize_downloaded_checkpoint(downloaded_path: str) -> str:
@@ -793,7 +779,7 @@ def _handle_job(job, local_job_files):
     # Download the zip file
     print("runpod-worker-kohya: downloading training archive")
     try:
-        downloaded_input = rp_download.file(job_input["zip_url"])
+        downloaded_input = download_dataset(job_input["zip_url"])
     except Exception as e:
         diagnostic = log_worker_failure("dataset_download", e, credential_boundary=True, job_id=job.get("id"))
         return {"error": "Failed to download training archive", "failure_stage": "dataset_download", "diagnostic": diagnostic}

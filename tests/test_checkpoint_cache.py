@@ -255,49 +255,25 @@ class CheckpointCacheTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
-    def test_deep_json_and_uppercase_cache_fail_closed(self):
+    def test_decoder_recursion_and_uppercase_cache_fail_closed(self):
         ns = load_cache_functions()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, "model.SAFETENSORS")
             path.write_bytes(safetensors_bytes())
             self.assertFalse(ns["checkpoint_matches_path"](str(path)))
-            raw = b'{"tensor":' + b"[" * 2000 + b"0" + b"]" * 2000 + b"}"
-            path.write_bytes(struct.pack("<Q", len(raw)) + raw)
-            with self.assertRaises(ValueError):
-                ns["sniff_checkpoint_extension"](str(path))
-
-    def test_checkpoint_download_never_extracts_and_cleans_failed_stream(self):
-        ns = load_cache_functions()
-        with tempfile.TemporaryDirectory() as directory:
-            session = Mock()
-            response = Mock()
-            session.get.return_value.__enter__ = Mock(return_value=response)
-            session.get.return_value.__exit__ = Mock(return_value=False)
-            manager = Mock()
-            manager.__enter__ = Mock(return_value=session)
-            manager.__exit__ = Mock(return_value=False)
-            ns["requests"] = Mock(Session=Mock(return_value=manager))
-            real_mkstemp = tempfile.mkstemp
-            def local_temp(**kwargs):
-                return real_mkstemp(dir=directory, suffix=kwargs["suffix"])
-            with patch.object(os, "makedirs"), patch.object(tempfile, "mkstemp", side_effect=local_temp):
-                response.iter_content.return_value = [b"PK\x03\x04", b"synthetic zip bytes"]
-                result = ns["download_checkpoint"]("https://example.test/model.zip")
-                self.assertEqual(Path(result["file_path"]).read_bytes(), b"PK\x03\x04synthetic zip bytes")
-                self.assertEqual(len(list(Path(directory).iterdir())), 1)
-                self.assertFalse(session.trust_env)
-                session.get.assert_called_with("https://example.test/model.zip", stream=True, timeout=(10, 60))
-                Path(result["file_path"]).unlink()
-                response.iter_content.side_effect = OSError("synthetic interrupted stream")
-                with self.assertRaises(OSError):
-                    ns["download_checkpoint"]("https://example.test/model")
-                self.assertEqual(list(Path(directory).iterdir()), [])
-                response.raise_for_status.side_effect = ValueError("synthetic HTTP failure")
-                response.iter_content.reset_mock()
+            # JSON decoder recursion thresholds vary between Python versions.
+            # Exercise the failure contract without relying on a specific depth.
+            with patch.object(json, "loads", side_effect=RecursionError("synthetic")) as decode:
                 with self.assertRaises(ValueError):
-                    ns["download_checkpoint"]("https://example.test/missing")
-                response.iter_content.assert_not_called()
-                self.assertEqual(list(Path(directory).iterdir()), [])
+                    ns["sniff_checkpoint_extension"](str(path))
+            decode.assert_called_once()
+
+    def test_checkpoint_download_uses_bounded_transport(self):
+        download = Mock(return_value={"file_path": "/synthetic/model.download"})
+        ns = load_cache_functions(download_file=download, MODEL_MAX_BYTES=16 * 1024**3)
+        result = ns["download_checkpoint"]("https://example.test/model")
+        download.assert_called_once_with("https://example.test/model", max_bytes=16 * 1024**3)
+        self.assertEqual(result, download.return_value)
 
     def test_failed_normalization_preserves_download_and_cleans_placeholder(self):
         ns = load_cache_functions()
