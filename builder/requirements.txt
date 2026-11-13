@@ -22,7 +22,7 @@ bitsandbytes==0.50.2
 Bottleneck==1.4.2
 certifi==2026.10.23
 charset-normalizer==3.4.1
-diffusers==0.25.0
+diffusers==0.38.0
 easygui==0.98.3
 einops==0.7.0
 entrypoints==0.4
@@ -31,7 +31,7 @@ frozenlist==1.5.0
 fsspec==2026.6.0
 ftfy==6.1.1
 grpcio==1.70.0
-huggingface-hub==0.24.5
+huggingface-hub==1.5.0
 idna==3.10
 imagesize==1.4.1
 importlib_metadata==8.6.1
@@ -39,7 +39,7 @@ Jinja2==3.1.6
 jsonschema==4.23.0
 jsonschema-specifications==2024.10.1
 # Pinned sd-scripts fork (must match builder/setup.sh commit).
--e git+https://github.com/anifusion/sd-scripts.git@59e616d1d1b5c52f2984d7004a96c2cff4b6ace3#egg=library
+-e git+https://github.com/anifusion/sd-scripts.git@6afdac3dc5ddc37f684af8a5c1c79d39995e61bb#egg=library
 lion-pytorch==0.0.6
 Markdown==3.7
 markdown-it-py==3.0.0
@@ -63,23 +63,23 @@ python-dateutil==2.9.0.post0
 pytz==2025.1
 PyYAML==6.0.2
 referencing==0.36.2
-regex==2024.11.6
+regex==2025.10.22
 requests==2.34.2
 rich==13.7.1
 rpds-py==0.22.3
-safetensors==0.4.2
+safetensors==0.8.0
 setuptools==84.2.1
 six==1.17.0
 sympy==1.14.0
 tensorboard==2.18.0
 tensorboard-data-server==0.7.2
-tokenizers==0.19.1
+tokenizers==0.23.1
 toml==0.10.2
 toolz==1.0.0
 torch==2.15.0
 torchvision==0.29.2
 tqdm==4.67.1
-transformers==4.44.0
+transformers==5.17.0
 triton==3.9.0
 typing_extensions==4.13.2
 tzdata==2025.1

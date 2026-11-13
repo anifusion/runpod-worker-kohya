@@ -62,7 +62,7 @@ The coordinated runtime upgrade is prepared locally as described next. Image/GPU
 
 ## Coordinated Python and GPU runtime upgrade
 
-This candidate uses Python 3.11 in `/opt/venv`, PyTorch 2.15.0, torchvision 0.29.2, Pillow 13.0.0, Triton 3.9.0, bitsandbytes 0.50.2, filelock 4.2.10 and SymPy 1.14.0. NumPy 1.25.2 and the training-framework pins remain unchanged to limit compatibility changes. Both sd-scripts pins still select `59e616d1d1b5c52f2984d7004a96c2cff4b6ace3`. No training algorithm, job schema or callback change is included.
+This candidate uses Python 3.11 in `/opt/venv`, PyTorch 2.15.0, torchvision 0.29.2, Pillow 13.0.0, Triton 3.9.0, bitsandbytes 0.50.2, filelock 4.2.10 and SymPy 1.14.0. NumPy 1.25.2 is retained. The coordinated training-framework migration is described next. No job schema or callback change is included.
 
 The NVIDIA base is CUDA 13.2.1 on Ubuntu 22.04, pinned by manifest digest. PyTorch's wheels supply CUDA 13.2.2 libraries. xformers 0.0.35 uses the explicit SHA-256-pinned CUDA 13.0 wheel from the official PyTorch index, not PyPI's CUDA 12.8 wheel. Its stable PyTorch ABI supports 2.10 and later. Native CUDA compatibility still requires execution on the intended GPU/driver. bitsandbytes includes its CUDA 13.2 backend. Do not mix the default CUDA 12 xformers binary into this image.
 
@@ -82,11 +82,11 @@ Selected installed packages: torch 2.15.0, torchvision 0.29.2, Pillow 13.0.0, xf
 
 The first attempt stopped at apt upgrade because Docker lacked archive space. After authorized removal of 24 untagged images, the unchanged candidate built successfully. A remaining approved image was retained because Docker refused removal without force. No containers, volumes or tagged images were removed. That storage blocker is resolved for this build.
 
-The subsequent compatible dependency patch and incremental scan are described next. GPU kernels, full SDXL training, output-quality/performance comparison, a clean release build of the final manifest and production adoption remain open. The image has not been pushed or deployed.
+This records the November 12 local build, not the current provider release state. Subsequent source changes and provider builds require their own image identity and acceptance evidence. GPU and output-quality acceptance cannot be inferred from these CPU checks.
 
 ### Compatible support-library patch
 
-The worker pins FastAPI 0.136.3, Starlette 1.3.1, fsspec 2026.6.0, protobuf 5.29.6, Rich 13.7.1 and setuptools 84.2.1. Unused pytorch-lightning, torchmetrics and lightning-utilities are removed. Training-framework versions and both fork pins remain unchanged. Framework advisory remediation requires a separately reviewed coordinated migration.
+The worker pins FastAPI 0.136.3, Starlette 1.3.1, fsspec 2026.6.0, protobuf 5.29.6, Rich 13.7.1 and setuptools 84.2.1. Unused pytorch-lightning, torchmetrics and lightning-utilities are removed. The support-library patch retained the training-framework pins. The coordinated migration described next updates them.
 
 The build runs `python3 /checks/worker_compatibility.py` after copying the handler. This checks offline tokenizer IDs, the real SDK's synthetic request/validation path and handler registration/input refusal without provider connections. Runtime checks also cover SDXL checkpoint conversion, conditioning gradients and the training learning-rate scheduler.
 
@@ -114,3 +114,13 @@ It checks the torch CUDA version and compute capability, and runs xformers atten
 No app payload migration or secret change is required. For provider commands needing existing credentials, load env vars through the approved process (see `.env.example`). This transition ends after the verification job passes and every worker runs the new image. Later deployments retaining the same runtime contract require no repeat CUDA-setting change.
 
 Sources: [PyTorch package metadata](https://pypi.org/pypi/torch/2.15.0/json), [xformers stable ABI](https://github.com/facebookresearch/xformers/releases/tag/v0.0.34), [bitsandbytes installation](https://huggingface.co/docs/bitsandbytes/v0.50.2/en/installation), [Pillow 13 changes](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html).
+
+## Transformers 5 migration
+
+The worker pairs Transformers 5.17.0 with Diffusers 0.38.0, huggingface-hub 1.5.0, tokenizers 0.23.1, safetensors 0.8.0 and regex 2025.10.22. Both training-source pins select `6afdac3dc5ddc37f684af8a5c1c79d39995e61bb`. This fork preserves the CLIP checkpoint hierarchy and supports explicit text-encoder target selection. The handler supplies `--network_args text_encoder_mlp_only=true` to preserve the MLP-only targets selected by the older Transformers 4.44 SDPA classes. Changing the packages without both pins or removing that argument is not a compatible upgrade.
+
+Python, PyTorch, CUDA, optimizer choice, payloads, callbacks and storage destinations are unchanged. The build checks checkpoint conversion, conditioning gradients, explicit adapter inventory, gradient checkpointing, scheduler behavior, offline tokenizers and the installed SDK. Synthetic regression tests check the actual handler command and pin agreement. No lint or formatter gate is declared.
+
+For first adoption, verify the connected build completes and the intended image is active. Run an authorized small private training and generation with its LoRA, checking finite loss, target inventory, private storage, callbacks, quality, memory and runtime. Exercise both supported precision modes. A CPU test cannot validate GPU kernels or full-model quality. On rollback restore the matching pre-migration framework and fork set while preserving storage and checkpoint safeguards. This transition ends after all claiming workers and training acceptance are verified. Subsequent compatible releases need no separate configuration or migration. No new runtime setting or secret is required.
+
+November 13, 2026 local migration verification: 36 worker tests, eight fork tests, eight CPU runtime checks and three installed-library checks passed on Linux amd64/Python 3.11. The GPU case was skipped. To reduce disk use, this test image used official CPU torch/torchvision wheels and omitted xformers, Triton and bitsandbytes. The full production manifest independently resolved 160 packages with its unchanged GPU pins. This is not a build of the final CUDA image. A targeted pip-audit check found no known advisories for the six changed packages, excluding transitive and OS packages. Production build and training acceptance remain required.

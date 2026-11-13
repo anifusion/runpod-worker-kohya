@@ -918,6 +918,9 @@ def _handle_job(job, local_job_files):
         "safetensors",
         "--network_module",
         "networks.lora",
+        # Preserve the text-encoder targets used by Transformers 4.44 SDPA.
+        "--network_args",
+        "text_encoder_mlp_only=true",
         "--optimizer_type",
         sanitized_params.get("optimizer_type", job_input["optimizer_type"]),
         "--logging_dir",

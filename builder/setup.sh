@@ -19,7 +19,7 @@ python3.11 -m venv /opt/venv
 # Pinned sd-scripts fork (must match builder/requirements.txt commit).
 git clone https://github.com/anifusion/sd-scripts.git
 cd sd-scripts
-git checkout 59e616d1d1b5c52f2984d7004a96c2cff4b6ace3
+git checkout 6afdac3dc5ddc37f684af8a5c1c79d39995e61bb
 
 # Cache models
 #wget https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors -P /model_cache

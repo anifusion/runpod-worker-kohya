@@ -24,7 +24,7 @@ from safetensors.torch import save_file, load_file
 from transformers import CLIPTextConfig, CLIPTextModelWithProjection
 import sdxl_train_network
 from library import train_util, utils, sdxl_model_util, sdxl_original_unet
-from networks.lora import LoRAModule
+from networks.lora import LoRAModule, create_network
 
 CLIPTextModel = sdxl_model_util.CLIPTextModel
 
@@ -36,13 +36,15 @@ class RuntimeCompatibility(unittest.TestCase):
 
     def test_training_cli_contract(self):
         args = sdxl_train_network.setup_parser().parse_args([
-            '--network_module', 'networks.lora', '--save_model_as', 'safetensors',
+            '--network_module', 'networks.lora', '--network_args', 'text_encoder_mlp_only=true',
+            '--save_model_as', 'safetensors',
             '--gradient_checkpointing', '--no_half_vae', '--cache_latents',
             '--tokenizer_cache_dir', '/tokenizer_cache', '--http-log',
             '--http-log-endpoint', 'https://example.test/log', '--http-log-token', 'synthetic',
             '--optimizer_type', 'AdamW8bit', '--resolution', '1024,1024'])
         self.assertTrue(args.gradient_checkpointing)
         self.assertEqual(args.optimizer_type, 'AdamW8bit')
+        self.assertEqual(args.network_args, ['text_encoder_mlp_only=true'])
 
     def test_dataset_image_loading_and_resizing(self):
         pixels = np.arange(32 * 24 * 3, dtype=np.uint8).reshape(24, 32, 3)
@@ -144,6 +146,29 @@ class RuntimeCompatibility(unittest.TestCase):
             gradient = encoder.text_model.embeddings.token_embedding.weight.grad
             self.assertIsNotNone(gradient)
             self.assertTrue(torch.isfinite(gradient).all())
+
+    def test_text_encoder_lora_targets_and_backward(self):
+        config = CLIPTextConfig(vocab_size=32, hidden_size=32, intermediate_size=64,
+            num_hidden_layers=1, num_attention_heads=4, max_position_embeddings=8,
+            projection_dim=32, eos_token_id=2, bos_token_id=1, pad_token_id=0)
+        config._attn_implementation = 'sdpa'
+        encoders = [CLIPTextModel(config), CLIPTextModelWithProjection(config)]
+        for encoder in encoders:
+            encoder.requires_grad_(False)
+        network = create_network(1.0, 4, 1.0, None, encoders, torch.nn.Identity(),
+            text_encoder_mlp_only='true')
+        expected = {f'lora_te{i}_text_model_encoder_layers_0_mlp_fc{j}'
+                    for i in (1, 2) for j in (1, 2)}
+        self.assertEqual({module.lora_name for module in network.text_encoder_loras}, expected)
+        network.apply_to(encoders, None, apply_text_encoder=True, apply_unet=False)
+        for encoder in encoders:
+            encoder.gradient_checkpointing_enable()
+            encoder.text_model.embeddings.requires_grad_(True)
+            encoder.train()
+            encoder(torch.tensor([[1, 5, 7, 2, 0, 0, 0, 0]])).last_hidden_state.square().mean().backward()
+        for module in network.text_encoder_loras:
+            self.assertIsNotNone(module.lora_up.weight.grad)
+            self.assertTrue(torch.isfinite(module.lora_up.weight.grad).all())
 
     def test_training_cosine_scheduler(self):
         args = sdxl_train_network.setup_parser().parse_args([
