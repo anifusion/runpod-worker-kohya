@@ -2,6 +2,7 @@
 Handler for the generation of a fine tuned lora model.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,7 @@ import time
 import traceback
 from urllib.parse import urlparse
 
+import requests
 import runpod
 from boto3 import session as boto_session
 from boto3.s3.transfer import TransferConfig
@@ -336,19 +338,16 @@ def leaf_has_checkpoint_extension(leaf: str) -> bool:
 
 
 def sniff_checkpoint_extension(local_path: str) -> str:
-    """
-    Pick a filename suffix so Kohya's loader matches file contents.
-    Blindly assuming .safetensors for Civitai /models/<id> is wrong if the version is a pickle .ckpt.
-    """
+    """Recognize safetensors without invoking a pickle or tensor loader."""
     with open(local_path, "rb") as f:
         head = f.read(8)
     if len(head) < 8:
         raise ValueError("file too small")
     if head[:2] == b"\x1f\x8b":
         raise ValueError("gzip prefix (need raw checkpoint bytes)")
-    if len(head) >= 4 and head[0:2] == b"PK" and head[2:4] == b"\x03\x04":
-        return ".ckpt"
-    # Try safetensors before PROTO 0x80: header length 128 makes first byte 0x80.
+    if head[:4] == b"PK\x03\x04":
+        raise ValueError("pickle and zip checkpoints are not supported")
+    # A safetensors header length of 128 starts with 0x80, so that byte alone is not a pickle signature.
     hlen = struct.unpack("<Q", head)[0]
     if 1 <= hlen <= _MAX_SAFE_TENSORS_HEADER:
         with open(local_path, "rb") as f:
@@ -359,11 +358,9 @@ def sniff_checkpoint_extension(local_path: str) -> str:
                 meta = json.loads(raw.decode("utf-8"))
                 if isinstance(meta, dict):
                     return ".safetensors"
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
                 pass
-    if head[0:1] == b"\x80":
-        return ".ckpt"
-    raise ValueError("not a recognized safetensors, zip, or pickle checkpoint")
+    raise ValueError("checkpoint must use safetensors")
 
 
 def checkpoint_matches_path(path: str) -> bool:
@@ -374,81 +371,70 @@ def checkpoint_matches_path(path: str) -> bool:
         detected = sniff_checkpoint_extension(path)
     except (OSError, ValueError):
         return False
-    suffix = os.path.splitext(path)[1].lower()
-    if suffix in (".safetensors", ".sft"):
-        return detected == ".safetensors"
-    if suffix in (".ckpt", ".pt", ".pth", ".bin"):
-        return detected == ".ckpt"
-    return False
+    suffix = os.path.splitext(path)[1]
+    return suffix == ".safetensors" and detected == ".safetensors"
 
 
-def _volume_checkpoint_try_legacy_migrate(
-    volume_dir: str, leaf: str, legacy_path: str
-) -> str | None:
-    """If an old cache used a bare numeric name, copy to leaf.<ext> so Kohya sees the right loader."""
-    if not os.path.isfile(legacy_path):
-        return None
-    try:
-        ext = sniff_checkpoint_extension(legacy_path)
-    except (OSError, ValueError) as e:
-        log_worker_failure("legacy_cache", e, credential_boundary=True)
-        return None
-    fixed = os.path.join(volume_dir, leaf + ext)
-    if fixed != legacy_path and not checkpoint_matches_path(fixed):
-        try:
-            cache_downloaded_checkpoint(legacy_path, fixed, volume_dir)
-            print("runpod-worker-kohya: migrated legacy cache")
-        except (OSError, ValueError) as src_err:
-            log_worker_failure("legacy_cache_migrate", src_err, credential_boundary=True)
-            return None
-    return fixed if os.path.isfile(fixed) else None
+def checkpoint_cache_path(volume_dir: str, model_url: str) -> str:
+    """Separate sources, including query variants, without persisting raw URLs."""
+    identity = hashlib.sha256(model_url.encode("utf-8")).hexdigest()
+    return os.path.join(volume_dir, "checkpoint-v2-" + identity + ".safetensors")
 
 
 def resolve_volume_checkpoint_path(volume_dir: str, model_url: str) -> str | None:
-    """Return an existing cached checkpoint path, or None to download."""
-    leaf = checkpoint_leaf_from_url(model_url)
-
-    if leaf_has_checkpoint_extension(leaf):
-        p = os.path.join(volume_dir, leaf)
-        if os.path.isfile(p):
-            if checkpoint_matches_path(p):
-                return p
-            print("runpod-worker-kohya: ignoring invalid volume checkpoint")
-        return None
-
-    for suffix in (".safetensors", ".ckpt"):
-        p = os.path.join(volume_dir, leaf + suffix)
-        if os.path.isfile(p):
-            if checkpoint_matches_path(p):
-                return p
-            print("runpod-worker-kohya: ignoring invalid volume checkpoint")
-
-    legacy = _volume_checkpoint_try_legacy_migrate(
-        volume_dir, leaf, os.path.join(volume_dir, leaf)
-    )
-    if legacy and checkpoint_matches_path(legacy):
-        return legacy
-    if legacy:
-        print("runpod-worker-kohya: ignoring invalid legacy checkpoint")
+    """Ignore legacy basename caches whose source identity cannot be established."""
+    path = checkpoint_cache_path(volume_dir, model_url)
+    if os.path.isfile(path) and not os.path.islink(path) and checkpoint_matches_path(path):
+        return path
     return None
+
+
+def download_checkpoint(model_url: str) -> dict:
+    """Stream raw model bytes without SDK archive extraction or server-supplied filenames."""
+    os.makedirs("job_files", exist_ok=True)
+    fd, path = tempfile.mkstemp(dir="job_files", suffix=".download")
+    try:
+        with os.fdopen(fd, "wb") as output, requests.Session() as session:
+            # Do not attach ambient netrc credentials to model hosts or redirects.
+            session.trust_env = False
+            with session.get(model_url, stream=True, timeout=(10, 60)) as response:
+                response.raise_for_status()
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    output.write(chunk)
+        return {"file_path": os.path.abspath(path)}
+    except Exception:
+        os.unlink(path)
+        raise
+
+
+def normalize_downloaded_checkpoint(downloaded_path: str) -> str:
+    """Ensure fallback downloads select the safetensors loader without a volume."""
+    if os.path.getsize(downloaded_path) < _MIN_VOLUME_CHECKPOINT_BYTES:
+        raise ValueError("downloaded checkpoint is too small")
+    sniff_checkpoint_extension(downloaded_path)
+    if os.path.splitext(downloaded_path)[1] == ".safetensors":
+        return downloaded_path
+    fd, normalized = tempfile.mkstemp(suffix=".safetensors", dir=os.path.dirname(downloaded_path) or ".")
+    os.close(fd)
+    try:
+        os.replace(downloaded_path, normalized)
+    except OSError:
+        os.unlink(normalized)
+        raise
+    return normalized
 
 
 def finalize_volume_checkpoint_dest(
     volume_dir: str, model_url: str, downloaded_path: str
 ) -> str:
-    """Target path under volume_dir after a fresh download (sniffs when URL has no extension)."""
+    """Validate downloaded bytes before choosing a source-bound cache path."""
     leaf = checkpoint_leaf_from_url(model_url)
     if os.path.getsize(downloaded_path) < _MIN_VOLUME_CHECKPOINT_BYTES:
         raise ValueError("downloaded checkpoint is too small")
-    detected = sniff_checkpoint_extension(downloaded_path)
-    if leaf_has_checkpoint_extension(leaf):
-        dest = os.path.join(volume_dir, leaf)
-        suffix = os.path.splitext(leaf)[1].lower()
-        expected = ".safetensors" if suffix in (".safetensors", ".sft") else ".ckpt"
-        if detected != expected:
-            raise ValueError("checkpoint content does not match URL suffix")
-        return dest
-    return os.path.join(volume_dir, leaf + detected)
+    sniff_checkpoint_extension(downloaded_path)
+    if leaf_has_checkpoint_extension(leaf) and os.path.splitext(leaf)[1].lower() not in (".safetensors", ".sft"):
+        raise ValueError("checkpoint URL selects an unsupported format")
+    return checkpoint_cache_path(volume_dir, model_url)
 
 
 def cache_downloaded_checkpoint(source_path: str, dest_path: str, volume_dir: str) -> None:
@@ -566,7 +552,57 @@ def validate_numeric_param(param_value, min_val=None, max_val=None):
         return False
 
 
+def remove_local_job_files(paths, job_id=None):
+    """Delete a job's local downloads, never the shared volume cache.
+
+    Base checkpoints are several gigabytes and warm workers run many jobs, so a
+    download left behind after a failed check or an unusable volume fills the
+    container disk and fails every later job on that worker. Training archives
+    and their extracted folders hold the user's private images, so they must not
+    outlive the job either. Only entries directly inside job_files are removed.
+    """
+    if not paths:
+        return
+    download_dir = os.path.realpath("job_files")
+    for path in paths:
+        try:
+            real_path = os.path.realpath(path)
+            if os.path.dirname(real_path) != download_dir:
+                continue
+            if os.path.isdir(real_path) and not os.path.islink(path):
+                shutil.rmtree(real_path)
+            else:
+                os.remove(real_path)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            log_worker_failure("job_files_cleanup", error, credential_boundary=True, job_id=job_id)
+
+
+def remove_training_workspace(job_id=None):
+    """Delete the copied training images and outputs once the job has returned."""
+    try:
+        shutil.rmtree("./training")
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        log_worker_failure("training_cleanup", error, credential_boundary=True, job_id=job_id)
+
+
 def handler(job):
+    """Run one training job and always remove its local files afterwards."""
+    local_job_files = []
+    job_id = job.get("id") if isinstance(job, dict) else None
+    try:
+        return _handle_job(job, local_job_files)
+    finally:
+        remove_local_job_files(local_job_files, job_id=job_id)
+        if local_job_files:
+            # Only jobs that reached the download stage created a workspace.
+            remove_training_workspace(job_id=job_id)
+
+
+def _handle_job(job, local_job_files):
     try:
         job_input = job["input"]
         job_input = validate(job_input, INPUT_SCHEMA)
@@ -654,7 +690,7 @@ def handler(job):
 
     VOLUME_DIR = "/runpod-volume"
 
-    # Check if model exists in volume directory (correct suffix, or legacy bare name)
+    # Only source-bound safetensors caches may reach the training loader.
     volume_model_path = resolve_volume_checkpoint_path(VOLUME_DIR, model_url)
     if volume_model_path:
         print("Model found in volume, using cached version")
@@ -663,15 +699,20 @@ def handler(job):
         # Download the model file
         print("runpod-worker-kohya: downloading model")
         try:
-            downloaded_model = rp_download.file(job_input["model_url"])
+            downloaded_model = download_checkpoint(job_input["model_url"])
         except Exception as e:
             diagnostic = log_worker_failure("model_download", e, credential_boundary=True, job_id=job.get("id"))
             return {"error": "Failed to download model", "failure_stage": "model_download", "diagnostic": diagnostic}
+        # handler deletes recorded local downloads when the job ends. The shared
+        # volume copy is never recorded, so the cache is kept.
+        local_job_files.append(downloaded_model["file_path"])
 
         try:
             volume_model_path = finalize_volume_checkpoint_dest(
                 VOLUME_DIR, model_url, downloaded_model["file_path"]
             )
+            downloaded_model["file_path"] = normalize_downloaded_checkpoint(downloaded_model["file_path"])
+            local_job_files.append(downloaded_model["file_path"])
         except (OSError, ValueError) as e:
             diagnostic = log_worker_failure("model_checkpoint", e, credential_boundary=True, job_id=job.get("id"))
             return {"error": "Downloaded file is not a usable base checkpoint", "failure_stage": "model_checkpoint", "diagnostic": diagnostic}
@@ -699,6 +740,10 @@ def handler(job):
     except Exception as e:
         diagnostic = log_worker_failure("dataset_download", e, credential_boundary=True, job_id=job.get("id"))
         return {"error": "Failed to download training archive", "failure_stage": "dataset_download", "diagnostic": diagnostic}
+    # The archive and its extracted folder hold the user's private images.
+    local_job_files.append(downloaded_input["file_path"])
+    if downloaded_input.get("extracted_path"):
+        local_job_files.append(downloaded_input["extracted_path"])
 
     # Clean up any stale training directory from previous jobs on this worker
     if os.path.exists("./training"):

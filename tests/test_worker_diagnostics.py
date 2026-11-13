@@ -15,7 +15,7 @@ SOURCE = Path(__file__).resolve().parents[1] / "src" / "handler.py"
 TREE = ast.parse(SOURCE.read_text(encoding="utf-8"))
 FUNCTIONS = [
     node for node in TREE.body
-    if (isinstance(node, ast.FunctionDef) and node.name in {"log_worker_failure", "_run_training_subprocess", "safe_training_failure_label", "handler"})
+    if (isinstance(node, ast.FunctionDef) and node.name in {"log_worker_failure", "_run_training_subprocess", "safe_training_failure_label", "handler", "_handle_job", "remove_local_job_files", "remove_training_workspace"})
     or (isinstance(node, ast.ClassDef) and node.name == "TrainingSubprocessTimeout")
 ]
 
