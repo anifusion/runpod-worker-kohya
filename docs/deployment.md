@@ -54,6 +54,12 @@ The headless training path does not require Tk. Published Python 3.11, developme
 
 November 12, 2026: registry resolution passed for Linux amd64/Python 3.11 with the selected GPU wheel. The NVIDIA manifest was verified to include amd64. CPU compatibility checks passed on both the previous torch 2.3.1/torchvision 0.18.1/Pillow 11.1.0 pair and the candidate under Python 3.11. They exercise the SDXL entry point, CLI contract, supported image formats and modes, resizing/cropping, gradient checkpointing, attention, tiny CLIP/VAE forward/backward passes, LoRA optimization and safetensors output. These are synthetic component checks, not a full SDXL training run or an output-quality guarantee. The 27 worker tests also pass. GPU checks are skipped on CPU and explicitly required by the release command. No image build, live GPU run or deployment is verified.
 
+### Linux build attempt
+
+November 12, 2026: the Linux amd64 build resolved and unpacked the pinned CUDA base successfully. It stopped during system package upgrade with apt exit code 100 because Docker's internal filesystem could not accommodate 843 MB of package archives. Python dependency installation, build-time compatibility checks and tokenizer caching were not reached. This is a storage blocker, not evidence that the candidate passes or fails Linux runtime compatibility. Restore sufficient Docker and host disk headroom, then rerun the full build without bypassing package updates or checks. Existing images, containers and volumes must not be deleted without operator authorization.
+
+The 27 worker regression tests and shell syntax checks still pass locally. A complete image, offline tokenizer/handler checks and native GPU acceptance remain outstanding.
+
 ### One-time adoption
 
 Applies when moving from Python 3.10/CUDA 12.1/torch 2.3.1 to this candidate. A production-connected push can automatically adopt the new image, so complete isolated acceptance before that release. An approved isolated NVIDIA GPU host is a prerequisite. If none is available, the upgrade is not ready for production.
