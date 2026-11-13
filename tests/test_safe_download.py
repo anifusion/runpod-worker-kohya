@@ -61,6 +61,12 @@ class DownloadTests(unittest.TestCase):
         with patch.object(socket, 'getaddrinfo', return_value=rows), self.assertRaises(ValueError):
             safe._resolve('example.test', 443, time.monotonic() + 2)
 
+    def test_resolver_failure_is_not_reported_as_policy_rejection(self):
+        with patch.object(socket, 'getaddrinfo', side_effect=socket.gaierror('synthetic')), \
+                self.assertRaises(OSError) as raised:
+            safe._resolve('example.test', 443, time.monotonic() + 2)
+        self.assertNotIsInstance(raised.exception, ValueError)
+
     def test_connection_pins_numeric_address_and_verifies_tls_hostname(self):
         sock = Mock()
         context = Mock()

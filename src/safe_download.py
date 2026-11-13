@@ -92,7 +92,10 @@ def _resolve(host, port, deadline):
         addresses = result.get(timeout=timeout)
     except queue.Empty:
         raise TimeoutError('name resolution timed out') from None
-    if not addresses or any(not _public_address(row[4][0]) for row in addresses):
+    # Keep resolver failures distinct from policy rejections in diagnostics.
+    if not addresses:
+        raise OSError('name resolution failed')
+    if any(not _public_address(row[4][0]) for row in addresses):
         raise DownloadDestinationRejected('download destination is not public')
     return addresses[:16]
 
