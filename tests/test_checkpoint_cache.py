@@ -137,8 +137,8 @@ class CheckpointCacheTests(unittest.TestCase):
                 download = Path(directory, "download")
                 download.write_bytes(safetensors_bytes())
                 ns = load_cache_functions()
-                local_model_files = []
-                ns.update({"local_model_files": local_model_files,
+                local_job_files = []
+                ns.update({"local_job_files": local_job_files,
                            "job_input": {"model_url": "https://example.test/models/123"},
                            "model_url": "https://example.test/models/123", "job": {"id": "synthetic-job"},
                            "download_checkpoint": Mock(return_value={"file_path": str(download)}),
@@ -159,20 +159,20 @@ class CheckpointCacheTests(unittest.TestCase):
                 self.assertTrue(result["file_path"].endswith(".safetensors"))
                 self.assertEqual(ns["cache_downloaded_checkpoint"].call_count, int(volume))
                 # The training copy is recorded for removal after the job.
-                self.assertIn(result["file_path"], local_model_files)
+                self.assertIn(result["file_path"], local_job_files)
                 # A misleading extension cannot make pickle bytes reach the loader.
                 download.write_bytes(b"PK\x03\x04" + b"synthetic" * 20)
                 ns["download_checkpoint"].return_value = {"file_path": str(download)}
                 result = ns["prepare"]()
                 self.assertEqual(result["failure_stage"], "model_checkpoint")
                 # A rejected download is recorded too, so the handler deletes it.
-                self.assertIn(str(download), local_model_files)
+                self.assertIn(str(download), local_job_files)
 
     def test_cleanup_removes_only_this_jobs_local_downloads(self):
         cleanup = next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
-                       and node.name == "remove_local_model_files")
+                       and node.name == "remove_local_job_files")
         log = Mock()
-        ns = {"os": os, "log_worker_failure": log}
+        ns = {"os": os, "shutil": shutil, "log_worker_failure": log}
         exec(compile(ast.Module(body=[cleanup], type_ignores=[]), str(SOURCE), "exec"), ns)
         with tempfile.TemporaryDirectory() as directory:
             previous = os.getcwd()
@@ -183,40 +183,77 @@ class CheckpointCacheTests(unittest.TestCase):
                 local.write_bytes(b"x")
                 renamed = Path(directory, "job_files", "a.safetensors")
                 renamed.write_bytes(b"x")
+                archive = Path(directory, "job_files", "dataset.zip")
+                archive.write_bytes(b"x")
+                extracted = Path(directory, "job_files", "dataset")
+                (extracted / "nested").mkdir(parents=True)
+                (extracted / "nested" / "image.png").write_bytes(b"x")
                 volume = Path(directory, "runpod-volume", "checkpoint-v2-a.safetensors")
                 volume.parent.mkdir()
                 volume.write_bytes(b"x")
                 linked = Path(directory, "job_files", "link.safetensors")
                 linked.symlink_to(volume)
-                ns["remove_local_model_files"]([str(local), str(renamed), str(volume), str(linked),
-                                                str(Path(directory, "job_files", "missing"))], job_id="synthetic")
-                self.assertFalse(local.exists())
-                self.assertFalse(renamed.exists())
-                # The shared cache survives, including through a symlink in the download folder.
+                linked_dir = Path(directory, "job_files", "link-dir")
+                linked_dir.symlink_to(volume.parent)
+                ns["remove_local_job_files"]([str(local), str(renamed), str(archive), str(extracted),
+                                              str(volume), str(linked), str(linked_dir),
+                                              str(Path(directory, "job_files", "missing"))], job_id="synthetic")
+                for removed in (local, renamed, archive, extracted):
+                    self.assertFalse(removed.exists(), removed)
+                # The shared cache survives, including through symlinks in the download folder.
                 self.assertTrue(volume.exists())
                 log.assert_not_called()
                 with patch.object(os, "remove", side_effect=PermissionError("synthetic")):
                     local.write_bytes(b"x")
-                    ns["remove_local_model_files"]([str(local)], job_id="synthetic")
-                self.assertEqual(log.call_args.args[0], "model_cleanup")
+                    ns["remove_local_job_files"]([str(local)], job_id="synthetic")
+                self.assertEqual(log.call_args.args[0], "job_files_cleanup")
             finally:
                 os.chdir(previous)
 
     def test_handler_cleans_up_after_success_and_failure(self):
         wrapper = next(node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == "handler")
-        removed = []
+        removed, workspaces = [], []
         def run_job(job, files):
-            files.append("/job_files/model.download")
+            if job.get("downloads"):
+                files.append("/job_files/model.download")
             if job.get("fail"):
                 raise RuntimeError("synthetic training failure")
             return {"lora": "synthetic"}
         ns = {"_handle_job": run_job,
-              "remove_local_model_files": lambda paths, job_id=None: removed.append((list(paths), job_id))}
+              "remove_local_job_files": lambda paths, job_id=None: removed.append((list(paths), job_id)),
+              "remove_training_workspace": lambda job_id=None: workspaces.append(job_id)}
         exec(compile(ast.Module(body=[wrapper], type_ignores=[]), str(SOURCE), "exec"), ns)
-        self.assertEqual(ns["handler"]({"id": "ok"}), {"lora": "synthetic"})
+        self.assertEqual(ns["handler"]({"id": "ok", "downloads": True}), {"lora": "synthetic"})
         with self.assertRaises(RuntimeError):
-            ns["handler"]({"id": "bad", "fail": True})
-        self.assertEqual(removed, [(["/job_files/model.download"], "ok"), (["/job_files/model.download"], "bad")])
+            ns["handler"]({"id": "bad", "downloads": True, "fail": True})
+        # A job rejected before any download has no workspace to remove.
+        ns["handler"]({"id": "invalid"})
+        self.assertEqual(removed, [(["/job_files/model.download"], "ok"),
+                                   (["/job_files/model.download"], "bad"), ([], "invalid")])
+        self.assertEqual(workspaces, ["ok", "bad"])
+
+    def test_training_workspace_cleanup_logs_failures(self):
+        cleanup = next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
+                       and node.name == "remove_training_workspace")
+        log = Mock()
+        ns = {"shutil": shutil, "log_worker_failure": log}
+        exec(compile(ast.Module(body=[cleanup], type_ignores=[]), str(SOURCE), "exec"), ns)
+        with tempfile.TemporaryDirectory() as directory:
+            previous = os.getcwd()
+            os.chdir(directory)
+            try:
+                Path("training/img").mkdir(parents=True)
+                Path("training/img/private.png").write_bytes(b"x")
+                ns["remove_training_workspace"]("synthetic")
+                self.assertFalse(Path("training").exists())
+                ns["remove_training_workspace"]("synthetic")
+                log.assert_not_called()
+                Path("training").mkdir()
+                with patch.object(shutil, "rmtree", side_effect=PermissionError("synthetic")):
+                    ns["remove_training_workspace"]("synthetic")
+                self.assertEqual(log.call_args.args[0], "training_cleanup")
+            finally:
+                os.chdir(previous)
 
     def test_deep_json_and_uppercase_cache_fail_closed(self):
         ns = load_cache_functions()

@@ -552,12 +552,14 @@ def validate_numeric_param(param_value, min_val=None, max_val=None):
         return False
 
 
-def remove_local_model_files(paths, job_id=None):
-    """Delete a job's local model downloads, never the shared volume cache.
+def remove_local_job_files(paths, job_id=None):
+    """Delete a job's local downloads, never the shared volume cache.
 
     Base checkpoints are several gigabytes and warm workers run many jobs, so a
     download left behind after a failed check or an unusable volume fills the
-    container disk and fails every later job on that worker.
+    container disk and fails every later job on that worker. Training archives
+    and their extracted folders hold the user's private images, so they must not
+    outlive the job either. Only entries directly inside job_files are removed.
     """
     if not paths:
         return
@@ -567,23 +569,40 @@ def remove_local_model_files(paths, job_id=None):
             real_path = os.path.realpath(path)
             if os.path.dirname(real_path) != download_dir:
                 continue
-            os.remove(real_path)
+            if os.path.isdir(real_path) and not os.path.islink(path):
+                shutil.rmtree(real_path)
+            else:
+                os.remove(real_path)
         except FileNotFoundError:
             pass
         except OSError as error:
-            log_worker_failure("model_cleanup", error, credential_boundary=True, job_id=job_id)
+            log_worker_failure("job_files_cleanup", error, credential_boundary=True, job_id=job_id)
+
+
+def remove_training_workspace(job_id=None):
+    """Delete the copied training images and outputs once the job has returned."""
+    try:
+        shutil.rmtree("./training")
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        log_worker_failure("training_cleanup", error, credential_boundary=True, job_id=job_id)
 
 
 def handler(job):
-    """Run one training job and always remove its local model downloads."""
-    local_model_files = []
+    """Run one training job and always remove its local files afterwards."""
+    local_job_files = []
+    job_id = job.get("id") if isinstance(job, dict) else None
     try:
-        return _handle_job(job, local_model_files)
+        return _handle_job(job, local_job_files)
     finally:
-        remove_local_model_files(local_model_files, job_id=job.get("id") if isinstance(job, dict) else None)
+        remove_local_job_files(local_job_files, job_id=job_id)
+        if local_job_files:
+            # Only jobs that reached the download stage created a workspace.
+            remove_training_workspace(job_id=job_id)
 
 
-def _handle_job(job, local_model_files):
+def _handle_job(job, local_job_files):
     try:
         job_input = job["input"]
         job_input = validate(job_input, INPUT_SCHEMA)
@@ -684,15 +703,16 @@ def _handle_job(job, local_model_files):
         except Exception as e:
             diagnostic = log_worker_failure("model_download", e, credential_boundary=True, job_id=job.get("id"))
             return {"error": "Failed to download model", "failure_stage": "model_download", "diagnostic": diagnostic}
-        # handler removes these after the job unless they were moved to the volume cache.
-        local_model_files.append(downloaded_model["file_path"])
+        # handler deletes recorded local downloads when the job ends. The shared
+        # volume copy is never recorded, so the cache is kept.
+        local_job_files.append(downloaded_model["file_path"])
 
         try:
             volume_model_path = finalize_volume_checkpoint_dest(
                 VOLUME_DIR, model_url, downloaded_model["file_path"]
             )
             downloaded_model["file_path"] = normalize_downloaded_checkpoint(downloaded_model["file_path"])
-            local_model_files.append(downloaded_model["file_path"])
+            local_job_files.append(downloaded_model["file_path"])
         except (OSError, ValueError) as e:
             diagnostic = log_worker_failure("model_checkpoint", e, credential_boundary=True, job_id=job.get("id"))
             return {"error": "Downloaded file is not a usable base checkpoint", "failure_stage": "model_checkpoint", "diagnostic": diagnostic}
@@ -720,6 +740,10 @@ def _handle_job(job, local_model_files):
     except Exception as e:
         diagnostic = log_worker_failure("dataset_download", e, credential_boundary=True, job_id=job.get("id"))
         return {"error": "Failed to download training archive", "failure_stage": "dataset_download", "diagnostic": diagnostic}
+    # The archive and its extracted folder hold the user's private images.
+    local_job_files.append(downloaded_input["file_path"])
+    if downloaded_input.get("extracted_path"):
+        local_job_files.append(downloaded_input["extracted_path"])
 
     # Clean up any stale training directory from previous jobs on this worker
     if os.path.exists("./training"):
