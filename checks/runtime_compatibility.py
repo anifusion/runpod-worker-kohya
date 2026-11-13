@@ -170,6 +170,27 @@ class RuntimeCompatibility(unittest.TestCase):
             self.assertIsNotNone(module.lora_up.weight.grad)
             self.assertTrue(torch.isfinite(module.lora_up.weight.grad).all())
 
+    def test_sdxl_text_encoder_lora_inventory(self):
+        # Full-size SDXL encoders built the way the checkpoint loader builds them,
+        # on the meta device. Saved LoRAs must keep the MLP-only key inventory.
+        from accelerate import init_empty_weights
+        shapes = [(1, 768, 3072, 12, 12, 'quick_gelu'), (2, 1280, 5120, 32, 20, 'gelu')]
+        encoders = []
+        with init_empty_weights():
+            for index, hidden, intermediate, layers, heads, activation in shapes:
+                config = CLIPTextConfig(vocab_size=49408, hidden_size=hidden,
+                    intermediate_size=intermediate, num_hidden_layers=layers,
+                    num_attention_heads=heads, max_position_embeddings=77, hidden_act=activation,
+                    projection_dim=hidden, pad_token_id=1, bos_token_id=0, eos_token_id=2)
+                model_class = CLIPTextModel if index == 1 else CLIPTextModelWithProjection
+                encoders.append(model_class._from_config(config) if index == 1 else model_class(config))
+        network = create_network(1.0, 4, 1.0, None, encoders, torch.nn.Identity(),
+            text_encoder_mlp_only='true')
+        expected = {f'lora_te{index}_text_model_encoder_layers_{layer}_mlp_fc{j}'
+                    for index, _, _, layers, _, _ in shapes for layer in range(layers) for j in (1, 2)}
+        self.assertEqual(len(expected), 88)
+        self.assertEqual({module.lora_name for module in network.text_encoder_loras}, expected)
+
     def test_training_cosine_scheduler(self):
         args = sdxl_train_network.setup_parser().parse_args([
             '--optimizer_type', 'AdamW', '--learning_rate', '0.001',
