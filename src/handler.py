@@ -552,7 +552,38 @@ def validate_numeric_param(param_value, min_val=None, max_val=None):
         return False
 
 
+def remove_local_model_files(paths, job_id=None):
+    """Delete a job's local model downloads, never the shared volume cache.
+
+    Base checkpoints are several gigabytes and warm workers run many jobs, so a
+    download left behind after a failed check or an unusable volume fills the
+    container disk and fails every later job on that worker.
+    """
+    if not paths:
+        return
+    download_dir = os.path.realpath("job_files")
+    for path in paths:
+        try:
+            real_path = os.path.realpath(path)
+            if os.path.dirname(real_path) != download_dir:
+                continue
+            os.remove(real_path)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            log_worker_failure("model_cleanup", error, credential_boundary=True, job_id=job_id)
+
+
 def handler(job):
+    """Run one training job and always remove its local model downloads."""
+    local_model_files = []
+    try:
+        return _handle_job(job, local_model_files)
+    finally:
+        remove_local_model_files(local_model_files, job_id=job.get("id") if isinstance(job, dict) else None)
+
+
+def _handle_job(job, local_model_files):
     try:
         job_input = job["input"]
         job_input = validate(job_input, INPUT_SCHEMA)
@@ -653,12 +684,15 @@ def handler(job):
         except Exception as e:
             diagnostic = log_worker_failure("model_download", e, credential_boundary=True, job_id=job.get("id"))
             return {"error": "Failed to download model", "failure_stage": "model_download", "diagnostic": diagnostic}
+        # handler removes these after the job unless they were moved to the volume cache.
+        local_model_files.append(downloaded_model["file_path"])
 
         try:
             volume_model_path = finalize_volume_checkpoint_dest(
                 VOLUME_DIR, model_url, downloaded_model["file_path"]
             )
             downloaded_model["file_path"] = normalize_downloaded_checkpoint(downloaded_model["file_path"])
+            local_model_files.append(downloaded_model["file_path"])
         except (OSError, ValueError) as e:
             diagnostic = log_worker_failure("model_checkpoint", e, credential_boundary=True, job_id=job.get("id"))
             return {"error": "Downloaded file is not a usable base checkpoint", "failure_stage": "model_checkpoint", "diagnostic": diagnostic}
